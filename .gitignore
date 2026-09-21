@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+
+data/
+*.pkl
+
+addresses.txt
+*.pem
+config.py
+!config_example/config.py
+peers.txt
+
+tor.exe
+cool62blockchain.zip
