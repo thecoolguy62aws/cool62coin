@@ -14,7 +14,7 @@ HERE = Path(__file__).parent
 TOR = r"C:\Users\awspa\portableapps\tor.exe"
 PY = sys.executable
 
-N1 = dict(port=8090, socks=9050, data=HERE / "data" / "n1", peers=HERE / "data" / "peers1.txt", chain=HERE / "data" / "chain1.pkl", mine_interval=1)
+N1 = dict(port=8090, socks=9050, data=HERE / "data" / "n1", peers=HERE / "data" / "peers1.txt", chain=HERE / "data" / "chain1.pkl")
 N2 = dict(port=8091, socks=9051, data=HERE / "data" / "n2", peers=HERE / "data" / "peers2.txt", chain=HERE / "data" / "chain2.pkl")
 
 os.environ.setdefault("NO_PROXY", "*")
@@ -40,7 +40,6 @@ def spawn(node):
         "--chain", str(node["chain"]),
         "--tor", TOR,
         "--sync-interval", "5",
-        "--mine-interval", str(node.get("mine_interval", 3600)),
     ], cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
@@ -99,6 +98,7 @@ def main():
 
     p1 = None
     p2 = None
+    miner_proc = None
     try:
         p1 = spawn(N1)
         onion1 = wait_onion(N1)
@@ -146,7 +146,24 @@ def main():
         propagated = call_until(tx_reached, timeout=90)
         print("tx in node2 txpool:", propagated)
 
-        print("waiting for node1 to auto-mine the block")
+        def work_has_tx():
+            w = requests.get("http://127.0.0.1:8090/work", timeout=10).json()
+            if not (w.get("success") and w.get("pending")):
+                raise AssertionError("no pending work yet")
+            if not any(t["sender"] == miner for t in w["transactions"]):
+                raise AssertionError("tx not in /work template yet")
+            return w
+
+        call_until(work_has_tx, timeout=90)
+        print("standalone miner sees the tx via /work")
+
+        miner_proc = subprocess.Popen([
+            PY, str(HERE / "miner.py"),
+            "--node", "http://127.0.0.1:8090",
+            "--interval", "1", "--cpu", "--threads", "2",
+        ], cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        print("waiting for standalone miner to produce block #2")
 
         def converged():
             h1 = api(onion1, "/info", N1["socks"])["height"]
@@ -161,11 +178,19 @@ def main():
 
         b1 = api(onion1, f"/balance?address={miner}", N1["socks"])["balance"]
         b2 = api(onion2, f"/balance?address={miner}", N2["socks"])["balance"]
-        print("balances node1/node2:", b1, b2, "target:", api(onion2, f"/balance?address={target}", N2["socks"])["balance"])
-        assert b1 == b2
+        btarget = api(onion2, f"/balance?address={target}", N2["socks"])["balance"]
+        print("balances node1/node2:", b1, b2, "target:", btarget)
+        assert b1 == b2 == 190.0, (b1, b2)
+        assert btarget == 10.0, btarget
 
         print("INTEGRATION TEST PASSED")
     finally:
+        if miner_proc is not None:
+            miner_proc.terminate()
+            try:
+                miner_proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                miner_proc.kill()
         for p in (p1, p2):
             if p is not None:
                 p.terminate()

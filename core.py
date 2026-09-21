@@ -77,6 +77,9 @@ def sign_transaction(private_key, sender, receiver, amount, nonce=0):
 
     return signature.hex()
 
+class MiningInterrupted(Exception):
+    pass
+
 class Block:
     def __init__(self, index, transactions, previous_hash, miner=None,
                  difficulty=0, nonce=0, timestamp=None):
@@ -103,9 +106,11 @@ class Block:
     def is_mined(self):
         return self.hash.startswith("0" * self.difficulty)
 
-    def mine(self, yield_every=0):
+    def mine(self, yield_every=0, step=1, stop_event=None):
         while not self.is_mined():
-            self.nonce += 1
+            if stop_event is not None and stop_event.is_set():
+                raise MiningInterrupted()
+            self.nonce += step
             self.hash = self.calculate_hash()
             if yield_every and self.nonce % yield_every == 0:
                 time.sleep(0)
@@ -134,7 +139,8 @@ class Block:
             timestamp=data.get("timestamp"),
         )
 
-def solve_block(candidate, yield_every=1024):
+def solve_block(candidate, yield_every=1024, nonce_start=0, stride=1,
+                stop_event=None):
     block = Block(
         index=candidate["index"],
         transactions=candidate["transactions"],
@@ -142,8 +148,9 @@ def solve_block(candidate, yield_every=1024):
         miner=candidate.get("miner"),
         difficulty=candidate.get("difficulty", 0),
         timestamp=candidate.get("timestamp"),
+        nonce=nonce_start,
     )
-    block.mine(yield_every=yield_every)
+    block.mine(yield_every=yield_every, step=stride, stop_event=stop_event)
     return block.to_dict()
 
 class Blockchain:

@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import threading
 import time
 from pathlib import Path
@@ -7,7 +9,6 @@ from flask import Flask, request, jsonify
 
 import config
 from core import Blockchain
-from mine import Miner
 from p2p import PeerNetwork
 from torlaunch import TorDaemon
 
@@ -16,8 +17,6 @@ blockchain = None
 
 my_onion = ""
 peer_net = None
-miner = None
-stopping = threading.Event()
 
 
 @app.get("/")
@@ -125,18 +124,26 @@ def info():
     )
 
 
-def mine_loop(interval):
-    while not stopping.is_set():
-        time.sleep(interval)
-        try:
-            candidate = blockchain.mine_block_candidate()
-            if candidate is None:
-                continue
-            solved = miner.solve(candidate)
-            if blockchain.commit_mined(solved):
-                peer_net.broadcast_block(solved)
-        except Exception:
-            pass
+@app.get("/work")
+def work():
+    tip = blockchain.last_block
+    index = len(blockchain.chain)
+    template = {
+        "index": index,
+        "previous_hash": tip.hash,
+        "transactions": list(blockchain.unconfirmed_transactions),
+        "difficulty": blockchain.difficulty_at_next(),
+        "timestamp": int(time.time()),
+    }
+    template_id = hashlib.sha256(
+        json.dumps(template, sort_keys=True).encode()
+    ).hexdigest()
+    return jsonify(
+        success=True,
+        pending=bool(template["transactions"]),
+        template_id=template_id,
+        **template,
+    )
 
 
 def main():
@@ -148,12 +155,10 @@ def main():
     parser.add_argument("--tor", default=str(config.TOR_BIN))
     parser.add_argument("--chain", default=None)
     parser.add_argument("--sync-interval", type=int, default=config.SYNC_INTERVAL)
-    parser.add_argument("--mine-interval", type=int, default=config.MINE_INTERVAL)
     args = parser.parse_args()
 
-    global my_onion, peer_net, blockchain, miner
+    global my_onion, peer_net, blockchain
     blockchain = Blockchain.load(args.chain)
-    miner = Miner()
 
     tor = TorDaemon(
         data_dir=args.data,
@@ -171,7 +176,6 @@ def main():
         sync_interval=args.sync_interval,
     )
 
-    threading.Thread(target=mine_loop, args=(args.mine_interval,), daemon=True).start()
     threading.Thread(target=peer_net.run, daemon=True).start()
 
     try:
@@ -179,8 +183,6 @@ def main():
     except KeyboardInterrupt:
         print("\nshutting down...")
     finally:
-        stopping.set()
-        miner.shutdown()
         tor.stop()
 
 

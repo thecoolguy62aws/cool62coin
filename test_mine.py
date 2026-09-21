@@ -6,7 +6,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from core import (Blockchain, solve_block, load_private_key,
+from core import (Blockchain, MiningInterrupted, solve_block, load_private_key,
                   load_key_address, sign_transaction)
 
 DIFF = 3
@@ -82,6 +82,33 @@ def main():
         bc.get_balance(miner)
         elapsed = time.time() - t0
         assert elapsed < 1.0, f"chain lock held during solve: {elapsed:.2f}s"
+
+        s = solve_block({"index": 3, "transactions": [], "previous_hash": "0" * 64,
+                         "miner": miner, "difficulty": DIFF},
+                        nonce_start=7, stride=5)
+        assert s["hash"].startswith("0" * DIFF)
+        assert s["nonce"] >= 7 and (s["nonce"] - 7) % 5 == 0, \
+            f"stride violated: nonce {s['nonce']}"
+
+        abort = threading.Event()
+        result = {}
+        def aborted_solve():
+            try:
+                solve_block({"index": 3, "transactions": [], "previous_hash": "0" * 64,
+                             "miner": miner, "difficulty": DIFF},
+                            nonce_start=0, stride=1, stop_event=abort)
+                result["exc"] = None
+            except MiningInterrupted:
+                result["exc"] = "interrupted"
+            except Exception as e:
+                result["exc"] = repr(e)
+        aborter = threading.Thread(target=aborted_solve, daemon=True)
+        aborter.start()
+        time.sleep(0.05)
+        abort.set()
+        aborter.join(2.0)
+        assert result.get("exc") == "interrupted", \
+            f"expected MiningInterrupted, got {result!r}"
     finally:
         shutil.rmtree(tmpdir)
 
