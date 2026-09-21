@@ -15,6 +15,7 @@ Usage:
 import argparse
 import hashlib
 import json
+import math
 import multiprocessing
 import queue
 import sys
@@ -104,7 +105,7 @@ def _cpu_worker(candidate, worker_id, num_workers, stop, attempts, attempt_lock,
             local += 1
             block.nonce += num_workers
             block.hash = block.calculate_hash()
-            if local % 65536 == 0:
+            if local % 4096 == 0:
                 flush()
     except Exception:
         pass
@@ -449,6 +450,8 @@ class GpuEngine:
 # --------------------------------------------------------------------------
 
 def fmt_hashrate(h):
+    if not math.isfinite(h) or h <= 0:
+        return "--"
     for unit in ("", "K", "M", "G", "T"):
         if h < 1000:
             return f"{h:,.1f}{unit}"
@@ -457,6 +460,8 @@ def fmt_hashrate(h):
 
 
 def fmt_eta(seconds):
+    if not math.isfinite(seconds):
+        return "--:--:--"
     s = max(0, int(seconds))
     return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
@@ -569,7 +574,8 @@ def main():
 
             now = time.monotonic()
             if t0 and now - last_stat >= 1.0:
-                rate = engine.tried / (now - t0)
+                dt = max(now - t0, 1e-9)
+                rate = engine.tried / dt
                 eta = (2 ** shown_work["difficulty"]) / rate if rate > 0 else float("inf")
                 line = (f"\r[{time.strftime('%H:%M:%S')}] {fmt_hashrate(rate)}/s "
                         f" target {shown_work['difficulty']} "

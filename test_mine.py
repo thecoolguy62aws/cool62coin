@@ -95,7 +95,7 @@ def main():
         def aborted_solve():
             try:
                 solve_block({"index": 3, "transactions": [], "previous_hash": "0" * 64,
-                             "miner": miner, "difficulty": DIFF},
+                             "miner": miner, "difficulty": 20},
                             nonce_start=0, stride=1, stop_event=abort)
                 result["exc"] = None
             except MiningInterrupted:
@@ -109,6 +109,7 @@ def main():
         aborter.join(2.0)
         assert result.get("exc") == "interrupted", \
             f"expected MiningInterrupted, got {result!r}"
+        assert not aborter.is_alive(), "solve thread must exit after interrupt"
     finally:
         shutil.rmtree(tmpdir)
 
