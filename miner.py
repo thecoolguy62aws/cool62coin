@@ -199,7 +199,7 @@ inline uchar msg_byte(uint pos, ulong val, uint plen, uint digits, uint slen,
     return suf[pos];
 }
 
-int digest_passes(const uint h[8], const uint tw[8])
+int digest_passes(const uint h[8], __global const uint* tw)
 {
     for (uint k = 0; k < 8; k++) {
         if (h[k] < tw[k]) return 1;
