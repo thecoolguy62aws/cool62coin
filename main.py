@@ -124,17 +124,29 @@ def info():
     )
 
 
+_work_memo_lock = threading.Lock()
+_work_memo = {"key": None, "template": None}
+
+
 @app.get("/work")
 def work():
     tip = blockchain.last_block
     index = len(blockchain.chain)
-    template = {
-        "index": index,
-        "previous_hash": tip.hash,
-        "transactions": list(blockchain.unconfirmed_transactions),
-        "difficulty": blockchain.difficulty_at_next(),
-        "timestamp": int(time.time()),
-    }
+    transactions = list(blockchain.unconfirmed_transactions)
+    tx_ids = tuple(sorted(blockchain.tx_id(tx) for tx in transactions))
+    difficulty = blockchain.difficulty_at_next()
+    key = (index, tip.hash, difficulty, tx_ids)
+    with _work_memo_lock:
+        if _work_memo["key"] != key:
+            _work_memo["key"] = key
+            _work_memo["template"] = {
+                "index": index,
+                "previous_hash": tip.hash,
+                "transactions": transactions,
+                "difficulty": difficulty,
+                "timestamp": int(time.time()),
+            }
+        template = _work_memo["template"]
     template_id = hashlib.sha256(
         json.dumps(template, sort_keys=True).encode()
     ).hexdigest()

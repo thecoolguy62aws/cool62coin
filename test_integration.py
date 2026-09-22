@@ -14,8 +14,9 @@ HERE = Path(__file__).parent
 TOR = r"C:\Users\awspa\portableapps\tor.exe"
 PY = sys.executable
 
-N1 = dict(port=8090, socks=9050, data=HERE / "data" / "n1", peers=HERE / "data" / "peers1.txt", chain=HERE / "data" / "chain1.pkl")
-N2 = dict(port=8091, socks=9051, data=HERE / "data" / "n2", peers=HERE / "data" / "peers2.txt", chain=HERE / "data" / "chain2.pkl")
+N1 = dict(port=8100, socks=9060, data=HERE / "data" / "n1", peers=HERE / "data" / "peers1.txt", chain=HERE / "data" / "chain1.pkl")
+N2 = dict(port=8101, socks=9061, data=HERE / "data" / "n2", peers=HERE / "data" / "peers2.txt", chain=HERE / "data" / "chain2.pkl")
+NODE1_URL = f"http://127.0.0.1:{N1['port']}"
 
 os.environ.setdefault("NO_PROXY", "*")
 
@@ -147,7 +148,7 @@ def main():
         print("tx in node2 txpool:", propagated)
 
         def work_has_tx():
-            w = requests.get("http://127.0.0.1:8090/work", timeout=10).json()
+            w = requests.get(NODE1_URL + "/work", timeout=10).json()
             if not (w.get("success") and w.get("pending")):
                 raise AssertionError("no pending work yet")
             if not any(t["sender"] == miner for t in w["transactions"]):
@@ -157,9 +158,16 @@ def main():
         call_until(work_has_tx, timeout=90)
         print("standalone miner sees the tx via /work")
 
+        pristine = requests.get(NODE1_URL + "/work", timeout=10).json()
+        time.sleep(2)
+        again = requests.get(NODE1_URL + "/work", timeout=10).json()
+        assert pristine["template_id"] == again["template_id"], "work template must be stable"
+        assert pristine["timestamp"] == again["timestamp"], "/work timestamp must not churn"
+        print("work template stable across polls")
+
         miner_proc = subprocess.Popen([
             PY, str(HERE / "miner.py"),
-            "--node", "http://127.0.0.1:8090",
+            "--node", NODE1_URL,
             "--interval", "1", "--cpu", "--threads", "2",
         ], cwd=HERE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -182,6 +190,29 @@ def main():
         print("balances node1/node2:", b1, b2, "target:", btarget)
         assert b1 == b2 == 190.0, (b1, b2)
         assert btarget == 10.0, btarget
+
+        sig2 = sign_transaction(priv, miner, target, 10.0, 2)
+        tx2 = {"sender": miner, "receiver": target, "amount": 10.0, "nonce": 2, "signature": sig2}
+        api(onion1, "/transaction", N1["socks"], body=tx2, method="POST")
+        print("second tx posted to node1")
+
+        def converged3():
+            h1 = api(onion1, "/info", N1["socks"])["height"]
+            h2 = api(onion2, "/info", N2["socks"])["height"]
+            if h1 == h2 == 3:
+                return h1, h2
+            raise AssertionError(f"heights not converged: {h1}/{h2}")
+
+        h1, h2 = call_until(converged3, timeout=180)
+        print("heights node1/node2 after second tx:", h1, h2)
+        assert h1 == h2 == 3
+
+        b1 = api(onion1, f"/balance?address={miner}", N1["socks"])["balance"]
+        b2 = api(onion2, f"/balance?address={miner}", N2["socks"])["balance"]
+        btarget = api(onion2, f"/balance?address={target}", N2["socks"])["balance"]
+        print("balances node1/node2 after second tx:", b1, b2, "target:", btarget)
+        assert b1 == b2 == 280.0, (b1, b2)
+        assert btarget == 20.0, btarget
 
         print("INTEGRATION TEST PASSED")
     finally:

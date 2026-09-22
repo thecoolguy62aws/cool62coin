@@ -18,6 +18,7 @@ import json
 import math
 import multiprocessing
 import queue
+import signal
 import sys
 import threading
 import time
@@ -79,6 +80,11 @@ def build_candidate(work, miner_address):
 # --------------------------------------------------------------------------
 
 def _cpu_worker(candidate, worker_id, num_workers, stop, attempts, attempt_lock, result_q):
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except (ValueError, OSError):
+        pass
+
     block = Block(
         index=candidate["index"],
         transactions=candidate["transactions"],
@@ -107,7 +113,7 @@ def _cpu_worker(candidate, worker_id, num_workers, stop, attempts, attempt_lock,
             block.hash = block.calculate_hash()
             if local % 4096 == 0:
                 flush()
-    except Exception:
+    except BaseException:
         pass
     flush()
     result_q.put({"ok": False, "reason": "stopped"})
@@ -143,13 +149,13 @@ class CpuEngine:
         return res.get("block") if res.get("ok") else None
 
     def stop(self):
-        self.stop_evt.set()
-        for p in self.procs:
-            p.join(timeout=2)
         try:
+            self.stop_evt.set()
+            for p in self.procs:
+                p.join(timeout=2)
             self.result_q.close()
             self.result_q.cancel_join_thread()
-        except Exception:
+        except BaseException:
             pass
 
 
@@ -299,8 +305,9 @@ def build_message(candidate):
         "miner": candidate["miner"],
     }
     s = json.dumps(body, sort_keys=True)
-    prefix = (s[:-1] + ', "nonce": ').encode("ascii")
-    suffix = b"}"
+    idx = s.index('"previous_hash"')
+    prefix = (s[:idx] + '"nonce": ').encode("ascii")
+    suffix = s[idx - 2:].encode("ascii")
     return prefix, suffix
 
 
@@ -336,9 +343,14 @@ class GpuEngine:
         self.need_half = self.difficulty - 2 * self.need_bytes
 
         self.mf = cl.mem_flags
-        self.pre_buf = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, self.prefix)
-        self.suf_buf = cl.Buffer(self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, self.suffix)
+        self.pre_buf = cl.Buffer(
+            self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+            hostbuf=self.prefix)
+        self.suf_buf = cl.Buffer(
+            self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+            hostbuf=self.suffix)
         self.program = cl.Program(self.ctx, _KERNEL).build()
+        self.kernel = self.program.sha256_search
 
         self._nonce = 0
         self._stop = False
@@ -347,18 +359,33 @@ class GpuEngine:
         self._verify_selftest()
 
     def _verify_selftest(self):
+        for k in (0, 123456789):
+            block = Block(
+                index=self.candidate["index"],
+                transactions=self.candidate["transactions"],
+                previous_hash=self.candidate["previous_hash"],
+                miner=self.candidate["miner"],
+                difficulty=self.candidate["difficulty"],
+                timestamp=self.candidate["timestamp"],
+                nonce=k,
+            )
+            msg = self.prefix + str(k).encode("ascii") + self.suffix
+            if hashlib.sha256(msg).hexdigest() != block.hash:
+                raise RuntimeError(
+                    "GPU message layout does not match Block.calculate_hash")
         nonce = 123456789
         digits = len(str(nonce))
-        dbg = cl.Buffer(self.ctx, self.mf.READ_WRITE, 32)
-        result = cl.Buffer(self.ctx, self.mf.READ_WRITE, 8)
+        dbg = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, 32)
+        result = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, 8)
         self._write_u32s(result, (0, 0xFFFFFFFF))
-        self.program.sha256_search(
+        np = self.np
+        self.kernel(
             self.queue, (1,), None,
-            self.pre_buf, self.cl.types.size_t(len(self.prefix)),
-            self.suf_buf, self.cl.types.size_t(len(self.suffix)),
-            digits, nonce, 1,
-            16, 0,               # need_bytes high -> self-test cannot hit
-            result, dbg, 1,
+            self.pre_buf, np.uint32(len(self.prefix)),
+            self.suf_buf, np.uint32(len(self.suffix)),
+            np.uint32(digits), np.uint64(nonce), np.uint32(1),
+            np.uint32(16), np.uint32(0),      # high bar -> self-test cannot hit
+            result, dbg, np.uint32(1),
         )
         self.queue.finish()
         got = b"".join(int(w).to_bytes(4, "big") for w in self._read_u32s(dbg, 8))
@@ -395,15 +422,16 @@ class GpuEngine:
         self._nonce += seq
         self.counter += seq
 
-        result = cl.Buffer(self.ctx, self.mf.READ_WRITE, 8)
+        result = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, 8)
         self._write_u32s(result, (0, 0xFFFFFFFF))
-        self.program.sha256_search(
+        np = self.np
+        self.kernel(
             self.queue, (seq,), None,
-            self.pre_buf, self.cl.types.size_t(len(self.prefix)),
-            self.suf_buf, self.cl.types.size_t(len(self.suffix)),
-            digits, start, seq,
-            self.need_bytes, self.need_half,
-            result, None, 0,
+            self.pre_buf, np.uint32(len(self.prefix)),
+            self.suf_buf, np.uint32(len(self.suffix)),
+            np.uint32(digits), np.uint64(start), np.uint32(seq),
+            np.uint32(self.need_bytes), np.uint32(self.need_half),
+            result, None, np.uint32(0),
         )
         return start, seq, result
 
@@ -473,9 +501,10 @@ def submit(node, block):
         if data.get("success"):
             return True
         print(f"\n  rejected by node: {data.get('error', 'unknown')}")
+        return False
     except Exception as e:
         print(f"\n  submit failed: {e}")
-    return False
+        return None
 
 
 def main():
@@ -509,12 +538,14 @@ def main():
             import pyopencl  # noqa: F401
             gpu_available = True
         except ImportError:
-            pass
+            print("pyopencl not installed; using CPU. "
+                  "Install with: pip install pyopencl")
 
     fetcher = WorkFetcher(args.node, args.interval)
     fetcher.start()
     engine = None
     active_tid = None
+    ignore_tid = None
     t0 = None
     last_stat = time.monotonic()
     shown_work = None
@@ -524,7 +555,11 @@ def main():
             snap = fetcher.snapshot()
             tid = snap[0] if snap else None
             work = snap[1] if snap else None
+            if ignore_tid is not None and tid is not None and tid != ignore_tid:
+                ignore_tid = None
             need = bool(work and work.get("pending") and work.get("transactions"))
+            if tid == ignore_tid:
+                need = False
 
             if engine is not None and (not need or tid != active_tid):
                 print("\n  template changed or no work; restarting")
@@ -562,13 +597,15 @@ def main():
 
             block = engine.poll(1.0)
             if block:
-                ok = submit(args.node, block)
+                result = submit(args.node, block)
                 print(f"  nonce={block['nonce']:,} hash={block['hash'][:16]}..."
-                      f" accepted={ok}")
+                      f" accepted={result}")
                 engine.stop()
                 engine = None
                 active_tid = None
                 t0 = None
+                if result is not None:
+                    ignore_tid = tid
                 time.sleep(1.0)
                 continue
 
@@ -587,7 +624,10 @@ def main():
         print("\nminer stopped")
     finally:
         if engine is not None:
-            engine.stop()
+            try:
+                engine.stop()
+            except BaseException:
+                pass
         fetcher.stop()
 
 
