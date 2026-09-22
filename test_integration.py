@@ -188,7 +188,7 @@ def main():
         b2 = api(onion2, f"/balance?address={miner}", N2["socks"])["balance"]
         btarget = api(onion2, f"/balance?address={target}", N2["socks"])["balance"]
         print("balances node1/node2:", b1, b2, "target:", btarget)
-        assert b1 == b2 == 190.0, (b1, b2)
+        assert b1 == b2 == 189.0, (b1, b2)
         assert btarget == 10.0, btarget
 
         sig2 = sign_transaction(priv, miner, target, 10.0, 2)
@@ -211,7 +211,7 @@ def main():
         b2 = api(onion2, f"/balance?address={miner}", N2["socks"])["balance"]
         btarget = api(onion2, f"/balance?address={target}", N2["socks"])["balance"]
         print("balances node1/node2 after second tx:", b1, b2, "target:", btarget)
-        assert b1 == b2 == 280.0, (b1, b2)
+        assert b1 == b2 == 278.0, (b1, b2)
         assert btarget == 20.0, btarget
 
         print("INTEGRATION TEST PASSED")

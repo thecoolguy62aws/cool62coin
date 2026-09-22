@@ -41,8 +41,12 @@ def main():
 
         assert bc.commit_mined(solved) is True
         assert bc.height == 2
-        assert bc.get_balance(miner) == 190.0
+        assert bc.get_balance(miner) == 189.0
         assert bc.get_balance(target) == 10.0
+
+        overspend = sign_transaction(priv, miner, target, 189.0, 3)
+        assert bc.add_transaction(miner, target, 189.0, overspend, 3) is False, \
+            "send of full balance must fail (1-coin fee makes it unaffordable)"
 
         assert bc.commit_mined(solved) is False, "stale commit must be rejected"
 

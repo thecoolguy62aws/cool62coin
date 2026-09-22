@@ -11,6 +11,8 @@ from cryptography.exceptions import InvalidSignature
 
 import config
 
+TRANSACTION_FEE = 1.0
+
 DEFAULT_KEY_FILE = Path(__file__).with_name("public_key.pem")
 CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
 
@@ -259,9 +261,9 @@ class Blockchain:
                     ok = verify_transaction(tx["sender"], tx["signature"], transaction_string)
                     if not ok:
                         return None
-                if tx["amount"] < 0 or balances.get(tx["sender"], 0) < tx["amount"]:
+                if tx["amount"] < 0 or balances.get(tx["sender"], 0) < tx["amount"] + TRANSACTION_FEE:
                     return None
-                balances[tx["sender"]] = balances.get(tx["sender"], 0) - tx["amount"]
+                balances[tx["sender"]] = balances.get(tx["sender"], 0) - tx["amount"] - TRANSACTION_FEE
                 balances[tx["receiver"]] = balances.get(tx["receiver"], 0) + tx["amount"]
         return balances
 
@@ -285,7 +287,7 @@ class Blockchain:
             return False
 
         with self._lock:
-            if self.rebuild_balances(self.chain).get(sender, 0) - self.pending_debits.get(sender, 0) < amount:
+            if self.rebuild_balances(self.chain).get(sender, 0) - self.pending_debits.get(sender, 0) < amount + TRANSACTION_FEE:
                 return False
 
             tx = {
@@ -424,7 +426,7 @@ class Blockchain:
     def _recompute_pending(self):
         pending = {}
         for tx in self.unconfirmed_transactions:
-            pending[tx["sender"]] = pending.get(tx["sender"], 0) + tx["amount"]
+            pending[tx["sender"]] = pending.get(tx["sender"], 0) + tx["amount"] + TRANSACTION_FEE
         self.pending_debits = pending
 
     def is_chain_valid(self):
