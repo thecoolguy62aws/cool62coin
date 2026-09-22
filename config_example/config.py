@@ -1,7 +1,12 @@
 from pathlib import Path
+import platform
+import shutil
 
 BASE_DIR = Path(__file__).parent
-TOR_BIN = BASE_DIR / "tor.exe"
+if platform.system() == "Windows":
+    TOR_BIN = BASE_DIR / "tor.exe"
+else:
+    TOR_BIN = shutil.which("tor") or "/usr/bin/tor"
 PEERS_FILE = BASE_DIR / "peers.txt"
 GENESIS_FILE = BASE_DIR / "genesis.json"
 DATA_DIR = BASE_DIR / "data"

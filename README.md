@@ -17,10 +17,9 @@
 1. Clone this repo onto your machine.
 2. Install dependancies: either `sudo apt install python3-pip python3-requests python3-flask python3-cryptography tor python3-pyopencl opencl-icd` or `pip install requests flask cryptography pyopencl`.
 3. Move `config.py` in `config_example/` to the root directory.
-4. Change `TOR_BIN = BASE_DIR / "tor.exe"` to `TOR_BIN = "/usr/bin/tor"` in `config.py` (your copy in the root directory).
-5. Run `gen_keys.py` to generate your wallet address.
-6. Place a known bootstrap onion in `peers.txt`.
-7. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will take a while. Wait for some logs to start printing before continuing. 
+4. Run `gen_keys.py` to generate your wallet address.
+5. Place a known bootstrap onion in `peers.txt`.
+6. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will take a while. Wait for some logs to start printing before continuing. 
 
 ## Basic Usage
 
