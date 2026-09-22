@@ -199,31 +199,20 @@ inline uchar msg_byte(uint pos, ulong val, uint plen, uint digits, uint slen,
     return suf[pos];
 }
 
-int digest_passes(const uint h[8], uint need_bytes, uint need_half)
+int digest_passes(const uint h[8], const uint tw[8])
 {
-    uint z = 0;
     for (uint k = 0; k < 8; k++) {
-        uint w = h[k];
-        for (int s = 24; s >= 0; s -= 8) {
-            uchar b = (uchar)((w >> s) & 0xff);
-            if (b == 0) {
-                z++;
-            } else {
-                if (z > need_bytes) return 1;
-                if (z < need_bytes) return 0;
-                if (need_half == 0) return 1;
-                return (b & 0xf0) == 0;
-            }
-        }
+        if (h[k] < tw[k]) return 1;
+        if (h[k] > tw[k]) return 0;
     }
-    return 1;
+    return 0;
 }
 
 __kernel void sha256_search(
     __global const uchar* pre, uint plen,
     __global const uchar* suf, uint slen,
     uint digits, ulong start_val, uint seq_len,
-    uint need_bytes, uint need_half,
+    __global const uint* tw,
     __global uint* result,
     __global uint* dbg, uint dbg_on)
 {
@@ -288,7 +277,7 @@ __kernel void sha256_search(
     }
 
     uint H[8] = {h0, h1, h2, h3, h4, h5, h6, h7};
-    if (digest_passes(H, need_bytes, need_half)) {
+    if (digest_passes(H, tw)) {
         atomic_max(&result[0], 1u);
         atomic_min(&result[1], gid);
     }
@@ -339,8 +328,13 @@ class GpuEngine:
         self.prefix, self.suffix = build_message(candidate)
         self.candidate = candidate
         self.difficulty = candidate["difficulty"]
-        self.need_bytes = self.difficulty // 2
-        self.need_half = self.difficulty - 2 * self.need_bytes
+        target = (1 << 256) // self.difficulty
+        tw_bytes = target.to_bytes(32, "big")
+        self.tw = self.np.array(
+            [int.from_bytes(tw_bytes[i:i + 4], "big") for i in range(0, 32, 4)],
+            dtype=self.np.uint32,
+        )
+        self.target = target
 
         self.mf = cl.mem_flags
         self.pre_buf = cl.Buffer(
@@ -351,6 +345,11 @@ class GpuEngine:
             hostbuf=self.suffix)
         self.program = cl.Program(self.ctx, _KERNEL).build()
         self.kernel = self.program.sha256_search
+        self.tw_buf = cl.Buffer(
+            self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR, hostbuf=self.tw)
+        self.t0_buf = cl.Buffer(
+            self.ctx, self.mf.READ_ONLY | self.mf.COPY_HOST_PTR,
+            hostbuf=self.np.zeros(8, dtype=self.np.uint32))
 
         self._nonce = 0
         self._stop = False
@@ -384,7 +383,7 @@ class GpuEngine:
             self.pre_buf, np.uint32(len(self.prefix)),
             self.suf_buf, np.uint32(len(self.suffix)),
             np.uint32(digits), np.uint64(nonce), np.uint32(1),
-            np.uint32(16), np.uint32(0),      # high bar -> self-test cannot hit
+            self.t0_buf,          # target 0 -> self-test cannot hit
             result, dbg, np.uint32(1),
         )
         self.queue.finish()
@@ -430,7 +429,7 @@ class GpuEngine:
             self.pre_buf, np.uint32(len(self.prefix)),
             self.suf_buf, np.uint32(len(self.suffix)),
             np.uint32(digits), np.uint64(start), np.uint32(seq),
-            np.uint32(self.need_bytes), np.uint32(self.need_half),
+            self.tw_buf,
             result, None, np.uint32(0),
         )
         return start, seq, result
@@ -451,13 +450,13 @@ class GpuEngine:
             return None
         msg = self.prefix + str(nonce).encode("ascii") + self.suffix
         digest = hashlib.sha256(msg).hexdigest()
-        if digest[: self.difficulty] != "0" * self.difficulty:
+        if not int(digest, 16) < self.target:
             print("\nGPU produced a bad nonce; searching CPU range...")
             for k in range(seq):
                 n = start + k
-                if hashlib.sha256(
+                if int(hashlib.sha256(
                         self.prefix + str(n).encode("ascii") + self.suffix
-                ).hexdigest()[: self.difficulty] == "0" * self.difficulty:
+                ).hexdigest(), 16) < self.target:
                     return self._block_for(n)
             return None
         return self._block_for(nonce)
@@ -613,7 +612,7 @@ def main():
             if t0 and now - last_stat >= 1.0:
                 dt = max(now - t0, 1e-9)
                 rate = engine.tried / dt
-                eta = (2 ** shown_work["difficulty"]) / rate if rate > 0 else float("inf")
+                eta = shown_work["difficulty"] / rate if rate > 0 else float("inf")
                 line = (f"\r[{time.strftime('%H:%M:%S')}] {fmt_hashrate(rate)}/s "
                         f" target {shown_work['difficulty']} "
                         f" ETA {fmt_eta(eta)} nonces {engine.tried:,}")

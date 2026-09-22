@@ -6,10 +6,15 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from core import (Blockchain, MiningInterrupted, solve_block, load_private_key,
-                  load_key_address, sign_transaction)
+from core import (Block, Blockchain, MiningInterrupted, solve_block,
+                  load_private_key, load_key_address, sign_transaction)
 
 DIFF = 3
+TARGET = (1 << 256) // DIFF
+
+
+def mined(h):
+    return int(h, 16) < TARGET
 
 
 def main():
@@ -36,7 +41,7 @@ def main():
 
         solved = solve_block(candidate)
         assert solved["difficulty"] == DIFF
-        assert solved["hash"].startswith("0" * DIFF)
+        assert mined(solved["hash"])
         assert solved["index"] == 1
 
         assert bc.commit_mined(solved) is True
@@ -90,7 +95,7 @@ def main():
         s = solve_block({"index": 3, "transactions": [], "previous_hash": "0" * 64,
                          "miner": miner, "difficulty": DIFF},
                         nonce_start=7, stride=5)
-        assert s["hash"].startswith("0" * DIFF)
+        assert mined(s["hash"])
         assert s["nonce"] >= 7 and (s["nonce"] - 7) % 5 == 0, \
             f"stride violated: nonce {s['nonce']}"
 
@@ -99,7 +104,7 @@ def main():
         def aborted_solve():
             try:
                 solve_block({"index": 3, "transactions": [], "previous_hash": "0" * 64,
-                             "miner": miner, "difficulty": 20},
+                             "miner": miner, "difficulty": 1 << 24},
                             nonce_start=0, stride=1, stop_event=abort)
                 result["exc"] = None
             except MiningInterrupted:
@@ -114,6 +119,38 @@ def main():
         assert result.get("exc") == "interrupted", \
             f"expected MiningInterrupted, got {result!r}"
         assert not aborter.is_alive(), "solve thread must exit after interrupt"
+
+        # ------- difficulty retarget unit checks (no commits, synthetic) -------
+        import config as cfg
+        R = cfg.RETARGET_INTERVAL
+        assert cfg.TARGET_BLOCK_TIME == 30 and R == 5
+        target_window = R * cfg.TARGET_BLOCK_TIME  # 150s
+
+        def mk(idx, diff, ts):
+            return Block(index=idx, transactions=[], previous_hash="0" * 64,
+                         miner=miner, difficulty=diff, timestamp=ts, nonce=0)
+
+        base = 1 << 20
+
+        no_retarget = [mk(i, base, 1000 + i * 30) for i in range(R - 1)]
+        assert bc.difficulty_at_next(no_retarget) == base, \
+            "difficulty must not change between retarget boundaries"
+
+        slow = [mk(i, base, 1000 + i * 75) for i in range(R)]  # span 300s
+        slow_next = bc.difficulty_at_next(slow)
+        assert slow_next == base // 2, slow_next  # halves towards 150s window
+
+        fast = [mk(i, base, 1000 + i * 7.5) for i in range(R)]  # span 30s
+        fast_next = bc.difficulty_at_next(fast)
+        assert fast_next == base * 4, fast_next  # capped at RETARGET_FACTOR
+
+        very_slow = [mk(i, base, 1000 + i * 10000) for i in range(R)]
+        floor_next = bc.difficulty_at_next(very_slow)
+        assert floor_next == base // 4, floor_next  # floored at prev / FACTOR
+
+        big = 1 << 30
+        tight = [mk(i, big, 1000 + i * 3.75) for i in range(R)]  # span 15s
+        assert bc.difficulty_at_next(tight) == min(big * 4, cfg.MAX_DIFFICULTY)
     finally:
         shutil.rmtree(tmpdir)
 

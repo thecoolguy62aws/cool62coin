@@ -12,6 +12,7 @@ from cryptography.exceptions import InvalidSignature
 import config
 
 TRANSACTION_FEE = 1.0
+RETARGET_FACTOR = 4
 
 DEFAULT_KEY_FILE = Path(__file__).with_name("public_key.pem")
 CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
@@ -92,6 +93,8 @@ class Block:
         self.miner = miner
         self.difficulty = difficulty
         self.nonce = nonce
+        self.target = (1 << 256) // difficulty \
+            if isinstance(difficulty, int) and difficulty > 0 else None
         self.hash = self.calculate_hash()
 
     def calculate_hash(self):
@@ -106,7 +109,9 @@ class Block:
         return hashlib.sha256(block_string).hexdigest()
 
     def is_mined(self):
-        return self.hash.startswith("0" * self.difficulty)
+        if self.target is None:
+            return False
+        return int(self.hash, 16) < self.target
 
     def mine(self, yield_every=0, step=1, stop_event=None):
         while not self.is_mined():
@@ -156,7 +161,7 @@ def solve_block(candidate, yield_every=1024, nonce_start=0, stride=1,
     return block.to_dict()
 
 class Blockchain:
-    _schema_version = 2
+    _schema_version = 3
 
     def __init__(self, difficulty=config.DIFFICULTY, reward=config.REWARD,
                  miner_address=None, chain_file=CHAIN_FILE):
@@ -220,16 +225,18 @@ class Blockchain:
     def difficulty_at_next(self, chain=None):
         chain = chain if chain is not None else self.chain
         if not chain:
-            return config.DIFFICULTY
+            return config.MIN_DIFFICULTY
         if len(chain) % config.RETARGET_INTERVAL != 0:
             return chain[-1].difficulty
-        window = chain[-config.RETARGET_INTERVAL:]
+        window = chain[-(config.RETARGET_INTERVAL + 1):] \
+            if len(chain) >= config.RETARGET_INTERVAL + 1 else chain[:]
         span = window[-1].timestamp - window[0].timestamp
-        if span < 1:
-            span = 1
-        target = config.RETARGET_INTERVAL * config.TARGET_BLOCK_TIME
-        difficulty = int(round(chain[-1].difficulty * target / span))
-        return min(config.MAX_DIFFICULTY, max(config.MIN_DIFFICULTY, difficulty))
+        target_window = config.RETARGET_INTERVAL * config.TARGET_BLOCK_TIME
+        prev = chain[-1].difficulty
+        candidate = prev * target_window // max(1, int(round(span)))
+        lo = max(config.MIN_DIFFICULTY, prev // RETARGET_FACTOR)
+        hi = min(config.MAX_DIFFICULTY, prev * RETARGET_FACTOR)
+        return min(hi, max(lo, candidate))
 
     @property
     def last_block(self):
@@ -351,7 +358,7 @@ class Blockchain:
                 return False
             if block.hash != block.calculate_hash():
                 return False
-            if not block.hash.startswith("0" * block.difficulty):
+            if not block.is_mined():
                 return False
             if i == 0:
                 if block.previous_hash != "0":
