@@ -10,7 +10,7 @@
 4. Put a copy of `tor.exe` in the root directory.
 5. Run `gen_keys.py` to generate your wallet address.
 6. Place a known bootstrap onion in `peers.txt`.
-7. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will take a while. Wait for some logs to start printing before continuing. 
+7. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will be nearly instant. Wait for some logs to start printing before continuing. 
 
 ### Linux, Darwin, and other Unix-like kernels.
 
@@ -19,7 +19,7 @@
 3. Move `config.py` in `config_example/` to the root directory.
 4. Run `gen_keys.py` to generate your wallet address.
 5. Place a known bootstrap onion in `peers.txt`.
-6. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will take a while. Wait for some logs to start printing before continuing. 
+6. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will be nearly instant. Wait for some logs to start printing before continuing. 
 
 ## Basic Usage
 
