@@ -27,7 +27,7 @@ def clean():
     for n in (N1, N2):
         n["peers"].unlink(missing_ok=True)
         n["chain"].unlink(missing_ok=True)
-        seed = Blockchain(difficulty=1)
+        seed = Blockchain()
         seed.save(n["chain"])
 
 
@@ -113,6 +113,9 @@ def main():
         info1 = call_until(lambda: api(onion1, "/info", N1["socks"]))
         info2 = call_until(lambda: api(onion2, "/info", N2["socks"]))
         assert info1["height"] == 1 and info2["height"] == 1, (info1, info2)
+        assert info1["genesis"] == info2["genesis"], "nodes must share genesis"
+        assert info1["network_id"] == info2["network_id"], "nodes must share consensus"
+        print("nodes share genesis:", info1["genesis"][:16])
 
         def mutual_peers():
             peers1 = api(onion1, "/peers", N1["socks"])["peers"]

@@ -5,6 +5,7 @@ from pathlib import Path
 import requests
 
 import config
+from core import network_id
 
 
 class PeerNetwork:
@@ -77,6 +78,10 @@ class PeerNetwork:
         for onion in list(self.peers):
             self.on_peer(onion, "POST", "/block", body=block_dict)
 
+    def broadcast_chain(self, block_dicts):
+        for onion in list(self.peers):
+            self.on_peer(onion, "POST", "/chain", body={"blocks": block_dicts})
+
     def on_local_tx(self, tx):
         self.seen_txs.add(self.blockchain.tx_id(tx))
         self.broadcast_tx(tx)
@@ -93,6 +98,13 @@ class PeerNetwork:
         if info.get("onion"):
             self.add_peer(info["onion"])
 
+        remote_id = info.get("network_id")
+        if remote_id and remote_id != network_id():
+            print(f"sync: peer {onion[:12]}... has incompatible network "
+                  f"config (network_id {remote_id[:12]}... != "
+                  f"{network_id()[:12]}...); skipping")
+            return
+
         if self.my_onion:
             self.on_peer(onion, "POST", "/peers", body={"peers": [self.my_onion]})
 
@@ -107,6 +119,7 @@ class PeerNetwork:
             local_height = self.blockchain.height
             remote_height = len(blocks)
             adopt = False
+            reason = ""
             if remote_height > local_height:
                 adopt = True
             elif remote_height == local_height and remote_height > 1:
@@ -114,9 +127,19 @@ class PeerNetwork:
                 local_tip = self.blockchain.last_block.hash
                 if remote_tip != local_tip and remote_tip < local_tip:
                     adopt = True
+                else:
+                    reason = "equal height, remote tip not smaller"
+            else:
+                reason = f"remote {remote_height} not taller than local {local_height}"
             if adopt:
                 if self.blockchain.adopt_chain(blocks):
+                    self.broadcast_chain(blocks)
                     self.broadcast_block(blocks[-1])
+                else:
+                    print(f"sync: peer {onion[:12]}... chain rejected by "
+                          f"adopt_chain (h {remote_height} vs {local_height})")
+            elif reason:
+                print(f"sync: peer {onion[:12]}... chain not adopted: {reason}")
 
         pool = self.on_peer(onion, "GET", "/txpool")
         if pool:

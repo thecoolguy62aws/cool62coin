@@ -8,7 +8,7 @@ from pathlib import Path
 from flask import Flask, request, jsonify
 
 import config
-from core import Blockchain
+from core import Blockchain, network_id
 from p2p import PeerNetwork
 from torlaunch import TorDaemon
 
@@ -29,6 +29,7 @@ def index():
             "GET /balance": "?address=<hex public key>",
             "POST /block": "submit a fully-mined block",
             "GET /chain": "full serialized chain",
+            "POST /chain": "adopt a full serialized chain",
             "GET /txpool": "unconfirmed transactions",
             "GET|POST /peers": "list or announce onion peers",
             "GET /info": "node info",
@@ -95,6 +96,17 @@ def chain():
     )
 
 
+@app.post("/chain")
+def upload_chain():
+    data = request.get_json(silent=True) or {}
+    blocks = data.get("blocks")
+    if not isinstance(blocks, list) or not blocks:
+        return jsonify(success=False, error="missing blocks"), 400
+    if blockchain.adopt_chain(blocks):
+        return jsonify(success=True), 200
+    return jsonify(success=False, error="blockchain rejected"), 400
+
+
 @app.get("/txpool")
 def txpool():
     return jsonify(success=True, transactions=blockchain.unconfirmed_transactions)
@@ -121,6 +133,9 @@ def info():
         height=len(blockchain.chain),
         difficulty=blockchain.difficulty_at_next(),
         reward=blockchain.reward,
+        network_id=network_id(),
+        genesis=blockchain.chain[0].hash,
+        tip=blockchain.last_block.hash,
     )
 
 

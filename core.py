@@ -83,6 +83,20 @@ def sign_transaction(private_key, sender, receiver, amount, nonce=0):
 class MiningInterrupted(Exception):
     pass
 
+
+def network_id():
+    params = {
+        "model": "target-int",
+        "RETARGET_INTERVAL": config.RETARGET_INTERVAL,
+        "TARGET_BLOCK_TIME": config.TARGET_BLOCK_TIME,
+        "MIN_DIFFICULTY": config.MIN_DIFFICULTY,
+        "MAX_DIFFICULTY": config.MAX_DIFFICULTY,
+        "REWARD": config.REWARD,
+        "TRANSACTION_FEE": TRANSACTION_FEE,
+        "RETARGET_FACTOR": RETARGET_FACTOR,
+    }
+    return hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()
+
 class Block:
     def __init__(self, index, transactions, previous_hash, miner=None,
                  difficulty=0, nonce=0, timestamp=None):
@@ -161,7 +175,7 @@ def solve_block(candidate, yield_every=1024, nonce_start=0, stride=1,
     return block.to_dict()
 
 class Blockchain:
-    _schema_version = 3
+    _schema_version = 4
 
     def __init__(self, difficulty=config.DIFFICULTY, reward=config.REWARD,
                  miner_address=None, chain_file=CHAIN_FILE):
@@ -173,6 +187,8 @@ class Blockchain:
         self.miner_address = miner_address or load_key_address()
         self.chain_file = Path(chain_file)
         self._lock = threading.Lock()
+        self._deterministic = bool(
+            miner_address is None and difficulty == config.DIFFICULTY)
         self.create_genesis_block()
 
     def __getstate__(self):
@@ -213,13 +229,27 @@ class Blockchain:
             with open(chain_file, "rb") as f:
                 instance = pickle.load(f)
             instance.chain_file = chain_file
+            if getattr(instance, "_lock", None) is None:
+                instance._lock = threading.Lock()
+            if not instance.is_chain_valid():
+                print("stored chain invalid on load; "
+                      "starting fresh from deterministic genesis")
+                return cls(chain_file=chain_file)
             return instance
         except Exception:
             return cls(chain_file=chain_file)
 
     def create_genesis_block(self):
-        genesis = Block(0, [], "0", miner=self.miner_address, difficulty=self.difficulty)
-        genesis.mine()
+        if self._deterministic and config.GENESIS:
+            spec = config.GENESIS
+            genesis = Block(
+                0, [], "0", miner=spec["miner"], difficulty=spec["difficulty"],
+                nonce=spec["nonce"], timestamp=spec["timestamp"],
+            )
+        else:
+            genesis = Block(0, [], "0", miner=self.miner_address,
+                            difficulty=self.difficulty)
+            genesis.mine()
         self.chain.append(genesis)
 
     def difficulty_at_next(self, chain=None):
