@@ -543,7 +543,7 @@ def main():
     fetcher = WorkFetcher(args.node, args.interval)
     fetcher.start()
     engine = None
-    active_tid = None
+    active_key = None
     ignore_tid = None
     t0 = None
     last_stat = time.monotonic()
@@ -559,12 +559,17 @@ def main():
             need = bool(work and work.get("pending") and work.get("transactions"))
             if tid == ignore_tid:
                 need = False
+            work_key = None
+            if work is not None:
+                work_key = (work.get("index"), work.get("previous_hash"),
+                            work.get("difficulty"))
 
-            if engine is not None and (not need or tid != active_tid):
-                print("\n  template changed or no work; restarting")
+            if engine is not None and work_key != active_key:
+                print("\n  chain state changed; rebasing to the new tip")
                 engine.stop()
                 engine = None
-                active_tid = None
+                active_key = None
+                t0 = None
 
             if engine is None and need:
                 candidate = build_candidate(work, miner_address)
@@ -586,7 +591,7 @@ def main():
                 else:
                     engine = CpuEngine(candidate, args.threads)
                     print(f"  engine: CPU x{args.threads}")
-                active_tid = tid
+                active_key = work_key
                 t0 = time.monotonic()
                 last_stat = time.monotonic()
 
@@ -601,7 +606,7 @@ def main():
                       f" accepted={result}")
                 engine.stop()
                 engine = None
-                active_tid = None
+                active_key = None
                 t0 = None
                 if result is not None:
                     ignore_tid = tid
