@@ -33,6 +33,7 @@ def index():
             "GET /txpool": "unconfirmed transactions",
             "GET|POST /peers": "list or announce onion peers",
             "GET /info": "node info",
+            "GET /p2p": "per-peer sync diagnostics",
         },
     )
 
@@ -83,6 +84,8 @@ def balance():
 def block():
     data = request.get_json(silent=True) or {}
     if blockchain.add_block(data):
+        threading.Thread(target=peer_net.broadcast_block, args=(data,),
+                         daemon=True).start()
         return jsonify(success=True), 200
     return jsonify(success=False, error="block rejected"), 400
 
@@ -103,6 +106,8 @@ def upload_chain():
     if not isinstance(blocks, list) or not blocks:
         return jsonify(success=False, error="missing blocks"), 400
     if blockchain.adopt_chain(blocks):
+        threading.Thread(target=peer_net.broadcast_chain, args=(blocks,),
+                         daemon=True).start()
         return jsonify(success=True), 200
     return jsonify(success=False, error="blockchain rejected"), 400
 
@@ -136,6 +141,18 @@ def info():
         network_id=network_id(),
         genesis=blockchain.chain[0].hash,
         tip=blockchain.last_block.hash,
+    )
+
+
+@app.get("/p2p")
+def p2p():
+    return jsonify(
+        success=True,
+        onion=my_onion,
+        peers=[
+            {"onion": onion, **state}
+            for onion, state in sorted(peer_net.peer_status().items())
+        ],
     )
 
 
