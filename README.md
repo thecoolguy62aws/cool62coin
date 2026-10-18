@@ -5,7 +5,7 @@
 ### Windows/NT
 
 1. Clone this repo onto your machine.
-2. Install dependencies: `pip install requests flask cryptography pyopencl`.
+2. Install dependencies: `pip install requests flask cryptography pyopencl waitress`.
 3. Move `config.py` in `config_example/` to the root directory.
 4. Put a copy of `tor.exe` in the root directory.
 5. Run `gen_keys.py` to generate your wallet address.
@@ -15,7 +15,7 @@
 ### Linux, Darwin, and other Unix-like kernels.
 
 1. Clone this repo onto your machine.
-2. Install dependancies: either `sudo apt install python3-pip python3-requests python3-flask python3-cryptography tor python3-pyopencl opencl-icd` or `pip install requests flask cryptography pyopencl`.
+2. Install dependancies: either `sudo apt install python3-pip python3-requests python3-flask python3-cryptography tor python3-pyopencl opencl-icd python-waitress` or `pip install requests flask cryptography pyopencl waitress`.
 3. Move `config.py` in `config_example/` to the root directory.
 4. Run `gen_keys.py` to generate your wallet address.
 5. Place a known bootstrap onion in `peers.txt`.
