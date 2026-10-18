@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+from waitress import serve
 from flask import Flask, request, jsonify
 
 import config
@@ -223,7 +224,7 @@ def main():
     threading.Thread(target=peer_net.run, daemon=True).start()
 
     try:
-        app.run(host="127.0.0.1", port=args.port)
+        serve(app, host="127.0.0.1", port=args.port)
     except KeyboardInterrupt:
         print("\nshutting down...")
     finally:
