@@ -7,6 +7,8 @@ import requests
 import config
 from core import network_id
 
+CHAIN_PAGE_LIMIT = getattr(config, "CHAIN_PAGE_LIMIT", 500)
+
 
 class PeerNetwork:
     def __init__(self, blockchain, peers_file, my_onion=None,
@@ -121,6 +123,66 @@ class PeerNetwork:
         except Exception:
             return None
 
+    def _chain_page(self, onion, from_index, limit):
+        page = self.on_peer(
+            onion, "GET", f"/chain?from_index={from_index}&limit={limit}")
+        if not page or not isinstance(page.get("blocks"), list):
+            return None
+        if "from_index" not in page:
+            return {"legacy": True, "blocks": page["blocks"]}
+        return page
+
+    def _fetch_range(self, onion, start, end, anchor_hash=None):
+        if end <= start:
+            return []
+        blocks = []
+        cursor = start
+        while cursor < end:
+            limit = min(CHAIN_PAGE_LIMIT, end - cursor)
+            page = self._chain_page(onion, cursor, limit)
+            if page is None or page.get("legacy"):
+                return None
+            if page.get("from_index") != cursor:
+                return None
+            page_blocks = page["blocks"]
+            if not page_blocks or len(page_blocks) > limit:
+                return None
+            if not blocks and anchor_hash is not None:
+                first = page_blocks[0]
+                if first.get("index") != start or \
+                        first.get("previous_hash") != anchor_hash:
+                    return None
+            blocks.extend(page_blocks)
+            nxt = page.get("next_from")
+            if nxt is None or nxt <= cursor:
+                cursor += len(page_blocks)
+            else:
+                cursor = nxt
+        if len(blocks) != end - start:
+            return None
+        return blocks
+
+    def _fetch_whole(self, onion):
+        page = self.on_peer(onion, "GET", "/chain")
+        if not page or not isinstance(page.get("blocks"), list):
+            return None
+        return page["blocks"]
+
+    def _fetch_candidate(self, onion, remote_height, remote_genesis):
+        chain = self.blockchain.chain
+        local_height = len(chain)
+        local_genesis = chain[0].hash
+        local_tip = chain[-1].hash
+        if remote_genesis == local_genesis and local_height < remote_height:
+            suffix = self._fetch_range(onion, local_height, remote_height,
+                                       anchor_hash=local_tip)
+            if suffix is not None:
+                return [block.to_dict() for block in chain] + suffix
+        full = self._fetch_range(onion, 0, remote_height)
+        if full is not None:
+            return full
+        return self._fetch_whole(onion)
+
     def broadcast_tx(self, tx):
         for onion in list(self.peers):
             self.on_peer(onion, "POST", "/transaction", body=tx)
@@ -169,38 +231,43 @@ class PeerNetwork:
             for peer in remote_peers.get("peers", []):
                 self.add_peer(peer)
 
-        remote_chain = self.on_peer(onion, "GET", "/chain")
-        if remote_chain:
-            blocks = remote_chain.get("blocks", [])
-            local_height = self.blockchain.height
-            remote_height = len(blocks)
-            self._note_ok(onion, remote_height)
-            adopt = False
-            reason = None
-            if remote_height > local_height:
+        local_height = self.blockchain.height
+        local_tip = self.blockchain.last_block.hash
+        remote_height = info.get("height")
+        remote_tip = info.get("tip")
+        remote_genesis = info.get("genesis")
+
+        adopt = False
+        reason = None
+        if remote_height is None:
+            reason = "no height in /info"
+        elif remote_height > local_height:
+            adopt = True
+        elif remote_height == local_height:
+            if remote_height > 1 and remote_tip and remote_tip != local_tip \
+                    and remote_tip < local_tip:
                 adopt = True
-            elif remote_height == local_height and remote_height > 1:
-                remote_tip = blocks[-1].get("hash")
-                local_tip = self.blockchain.last_block.hash
-                if remote_tip != local_tip and remote_tip < local_tip:
-                    adopt = True
-                else:
-                    reason = "equal height, remote tip not smaller"
-            else:
-                reason = None if remote_height == local_height else \
-                    f"remote {remote_height} not taller than local {local_height}"
-            if adopt:
-                if self.blockchain.adopt_chain(blocks):
-                    self.broadcast_chain(blocks)
-                    self.broadcast_block(blocks[-1])
-                else:
-                    reason = f"chain rejected by adopt_chain " \
-                             f"(h {remote_height} vs {local_height})"
-                    self._note_fail(onion, reason, backoff=False)
-            elif reason:
-                self._note_fail(onion, reason, backoff=False)
+            elif remote_height > 1:
+                reason = "equal height, remote tip not smaller"
         else:
-            self._note_fail(onion, "no /chain response")
+            reason = f"remote {remote_height} not taller than local " \
+                     f"{local_height}"
+
+        if adopt:
+            blocks = self._fetch_candidate(onion, remote_height, remote_genesis)
+            if blocks is None:
+                self._note_fail(onion, "incomplete chain sync")
+            elif self.blockchain.adopt_chain(blocks):
+                self._note_ok(onion, max(remote_height, len(blocks)))
+                self.broadcast_chain(blocks)
+                self.broadcast_block(blocks[-1])
+            else:
+                self._note_fail(
+                    onion,
+                    f"chain rejected by adopt_chain "
+                    f"(h {len(blocks)} vs {local_height})", backoff=False)
+        elif reason:
+            self._note_fail(onion, reason, backoff=False)
 
         pool = self.on_peer(onion, "GET", "/txpool")
         if pool:
