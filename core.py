@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 TRANSACTION_FEE = 1.0
 RETARGET_FACTOR = 4
+TX_MEMO_MAX = getattr(config, "TX_MEMO_MAX", 512)
 
 DEFAULT_KEY_FILE = Path(__file__).with_name("public_key.pem")
 CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
@@ -36,6 +37,26 @@ def load_key_address(path=None):
 def load_private_key(path="private_key.pem", password=None):
     with open(path, "rb") as f:
         return serialization.load_pem_private_key(f.read(), password=password)
+
+def _validated_memo(memo):
+    if memo is None or memo == "":
+        return None
+    if not isinstance(memo, str):
+        raise ValueError("memo must be a string")
+    if len(memo.encode("utf-8")) > TX_MEMO_MAX:
+        raise ValueError(f"memo exceeds {TX_MEMO_MAX} bytes")
+    return memo
+
+def tx_signing_payload(sender, receiver, amount, nonce, memo=None):
+    payload = {
+        "sender": sender,
+        "receiver": receiver,
+        "amount": amount,
+        "nonce": nonce,
+    }
+    if memo:
+        payload["memo"] = memo
+    return json.dumps(payload, sort_keys=True).encode()
 
 def verify_transaction(sender, signature, transaction_string):
     signature_bytes = bytes.fromhex(signature)
@@ -61,13 +82,9 @@ def verify_transaction(sender, signature, transaction_string):
         except (InvalidSignature, ValueError):
             return False
 
-def sign_transaction(private_key, sender, receiver, amount, nonce=0):
-    transaction_string = json.dumps({
-        "sender": sender,
-        "receiver": receiver,
-        "amount": amount,
-        "nonce": nonce
-    }, sort_keys=True).encode()
+def sign_transaction(private_key, sender, receiver, amount, nonce=0, memo=None):
+    memo = _validated_memo(memo)
+    transaction_string = tx_signing_payload(sender, receiver, amount, nonce, memo)
 
     if isinstance(private_key, rsa.RSAPrivateKey):
         signature = private_key.sign(
@@ -315,10 +332,13 @@ class Blockchain:
                 balances[block.miner] = balances.get(block.miner, 0) + self.reward
             for tx in block.transactions:
                 if verify:
-                    transaction_string = json.dumps(
-                        {k: tx[k] for k in ("sender", "receiver", "amount", "nonce")},
-                        sort_keys=True
-                    ).encode()
+                    try:
+                        memo = _validated_memo(tx.get("memo"))
+                    except ValueError:
+                        return None
+                    transaction_string = tx_signing_payload(
+                        tx["sender"], tx["receiver"], tx["amount"], tx["nonce"], memo
+                    )
                     ok = verify_transaction(tx["sender"], tx["signature"], transaction_string)
                     if not ok:
                         return None
@@ -328,18 +348,17 @@ class Blockchain:
                 balances[tx["receiver"]] = balances.get(tx["receiver"], 0) + tx["amount"]
         return balances
 
-    def add_transaction(self, sender, receiver, amount, signature, nonce=0):
+    def add_transaction(self, sender, receiver, amount, signature, nonce=0, memo=None):
         if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount < 0:
             return False
         if isinstance(nonce, bool) or not isinstance(nonce, int):
             return False
+        try:
+            memo = _validated_memo(memo)
+        except ValueError:
+            return False
 
-        transaction_string = json.dumps({
-            "sender": sender,
-            "receiver": receiver,
-            "amount": amount,
-            "nonce": nonce
-        }, sort_keys=True).encode()
+        transaction_string = tx_signing_payload(sender, receiver, amount, nonce, memo)
 
         try:
             if not verify_transaction(sender, signature, transaction_string):
@@ -358,6 +377,8 @@ class Blockchain:
                 "nonce": nonce,
                 "signature": signature
             }
+            if memo:
+                tx["memo"] = memo
             if self.mempool_has(tx):
                 return False
             self.unconfirmed_transactions.append(tx)

@@ -289,6 +289,7 @@ class PeerNetwork:
                     tx.get("amount"),
                     tx.get("signature"),
                     tx.get("nonce", 0),
+                    tx.get("memo"),
                 )
                 if ok:
                     self.seen_txs.add(txid)

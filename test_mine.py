@@ -151,6 +151,49 @@ def main():
         big = 1 << 30
         tight = [mk(i, big, 1000 + i * 3.75) for i in range(R)]  # span 15s
         assert bc.difficulty_at_next(tight) == min(big * 4, cfg.MAX_DIFFICULTY)
+
+        # ------- memo field checks -------
+        bc2 = Blockchain(difficulty=DIFF, miner_address=miner,
+                         chain_file=Path(tmpdir) / "chain_memo.pkl")
+
+        memo = "invoice 42 \u20ac"
+        sig_memo = sign_transaction(priv, miner, target, 1.0, 1, memo)
+        assert bc2.add_transaction(miner, target, 1.0, sig_memo, 1, memo) is True
+        cand = bc2.mine_block_candidate()
+        assert cand["transactions"][0].get("memo") == memo, "memo must be stored"
+
+        sig_orig = sign_transaction(priv, miner, target, 2.0, 2, memo="original")
+        assert bc2.add_transaction(miner, target, 2.0, sig_orig, 2, memo="tampered") is False, \
+            "memo is signed; tampering must be rejected"
+
+        sig_nomemo = sign_transaction(priv, miner, target, 3.0, 3)
+        assert bc2.add_transaction(miner, target, 3.0, sig_nomemo, 3, memo="injected") is False, \
+            "adding a memo to a memo-less signature must be rejected"
+        assert bc2.add_transaction(miner, target, 3.0, sig_nomemo, 3) is True, \
+            "memo-less transactions must still verify (backward compatible)"
+
+        limit_memo = "x" * cfg.TX_MEMO_MAX
+        sig_limit = sign_transaction(priv, miner, target, 1.0, 4, limit_memo)
+        assert bc2.add_transaction(miner, target, 1.0, sig_limit, 4, limit_memo) is True, \
+            "memo exactly at the byte limit is allowed"
+
+        too_big = "x" * (cfg.TX_MEMO_MAX + 1)
+        try:
+            sign_transaction(priv, miner, target, 1.0, 5, too_big)
+            raise AssertionError("sign_transaction must reject oversized memo")
+        except ValueError:
+            pass
+        assert bc2.add_transaction(miner, target, 1.0, sig_limit, 5, too_big) is False, \
+            "oversized memo must be rejected"
+
+        bad_tx = {"sender": miner, "receiver": target, "amount": 1.0, "nonce": 9,
+                  "signature": "00" * 8, "memo": too_big}
+        bad_block = Block(index=1, transactions=[bad_tx],
+                          previous_hash=bc2.last_block.hash,
+                          miner=miner, difficulty=DIFF, nonce=0)
+        bad_block.mine()
+        assert bc2.validate_chain(list(bc2.chain) + [bad_block]) is False, \
+            "consensus must reject an oversized memo inside a block"
     finally:
         shutil.rmtree(tmpdir)
 

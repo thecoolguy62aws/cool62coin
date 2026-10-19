@@ -46,13 +46,17 @@ def cmd_balance(args):
 def cmd_send(args):
     receiver = args.receiver
     amount = _amount(args.amount)
+    memo = getattr(args, "memo", None) or None
     node_url = args.node
 
     from_address = load_key_address()
     private_key = load_private_key(args.key)
     nonce = int(time.time())
 
-    signature = sign_transaction(private_key, from_address, receiver, amount, nonce)
+    try:
+        signature = sign_transaction(private_key, from_address, receiver, amount, nonce, memo)
+    except ValueError as e:
+        sys.exit(f"error: {e}")
     tx = {
         "sender": from_address,
         "receiver": receiver,
@@ -60,6 +64,8 @@ def cmd_send(args):
         "nonce": nonce,
         "signature": signature,
     }
+    if memo:
+        tx["memo"] = memo
 
     from_path = args.node.replace("http://", "").replace("https://", "")
     print(f"sending {amount} to {receiver[:16]}... from {from_address[:16]} at {from_path}")
@@ -70,7 +76,7 @@ def cmd_send(args):
 HELP_TEXT = """commands:
   address                      print this wallet's address
   balance [address]            show a balance (default: this wallet)
-  send <receiver> <amount>     sign and send a transaction
+  send <receiver> <amount> [memo]  sign and send a transaction
   status                       node height / difficulty / own onion
   help                         show this help
   quit                         exit"""
@@ -109,10 +115,11 @@ def interactive(args):
                 cmd_balance(args)
             elif cmd == "send":
                 if len(parts) < 2:
-                    print("usage: send <receiver> <amount>")
+                    print("usage: send <receiver> <amount> [memo]")
                     continue
                 args.receiver = parts[0]
                 args.amount = parts[1]
+                args.memo = " ".join(parts[2:]) if len(parts) > 2 else None
                 args.key = DEFAULT_KEY
                 cmd_send(args)
             else:
@@ -135,6 +142,7 @@ def main():
     p = sub.add_parser("send", help="sign and send a transaction")
     p.add_argument("receiver", help="receiver address (hex public key)")
     p.add_argument("amount", help="amount to send")
+    p.add_argument("memo", nargs="?", default=None, help="optional memo (max 512 UTF-8 bytes)")
 
     args = parser.parse_args()
     if args.command is None:

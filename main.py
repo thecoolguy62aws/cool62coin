@@ -24,6 +24,7 @@ my_onion = ""
 peer_net = None
 
 CHAIN_PAGE_MAX = getattr(config, "CHAIN_PAGE_MAX", 1000)
+TX_MEMO_MAX = getattr(config, "TX_MEMO_MAX", 512)
 
 
 @app.before_request
@@ -50,7 +51,7 @@ def index():
         success=True,
         onion=my_onion,
         endpoints={
-            "POST /transaction": "{sender, receiver, amount, signature, nonce}",
+            "POST /transaction": "{sender, receiver, amount, signature, nonce, memo?}",
             "GET /balance": "?address=<hex public key>",
             "POST /block": "submit a fully-mined block",
             "GET /chain": "serialized chain (?from_index=&limit= pages, else full)",
@@ -71,6 +72,7 @@ def transaction():
     amount = data.get("amount")
     signature = data.get("signature")
     nonce = data.get("nonce", 0)
+    memo = data.get("memo")
 
     if not all(isinstance(v, str) and v for v in (sender, receiver, signature)):
         return jsonify(success=False, error="sender, receiver and signature must be non-empty strings"), 400
@@ -81,6 +83,11 @@ def transaction():
     if isinstance(nonce, bool) or not isinstance(nonce, int):
         return jsonify(success=False, error="nonce must be an integer"), 400
 
+    if memo is not None and not isinstance(memo, str):
+        return jsonify(success=False, error="memo must be a string"), 400
+    if memo and len(memo.encode("utf-8")) > TX_MEMO_MAX:
+        return jsonify(success=False, error=f"memo exceeds {TX_MEMO_MAX} bytes"), 400
+
     tx = {
         "sender": sender,
         "receiver": receiver,
@@ -88,8 +95,10 @@ def transaction():
         "nonce": nonce,
         "signature": signature,
     }
+    if memo:
+        tx["memo"] = memo
     already = blockchain.mempool_has(tx)
-    if not blockchain.add_transaction(sender, receiver, amount, signature, nonce):
+    if not blockchain.add_transaction(sender, receiver, amount, signature, nonce, memo):
         return jsonify(success=False, error="transaction rejected: bad signature, invalid address or insufficient funds"), 400
     logger.info("accepted tx %s %s->%s amount=%s",
                 blockchain.tx_id(tx)[:8], sender[:8], receiver[:8], amount)
