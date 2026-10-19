@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from pathlib import Path
@@ -8,6 +9,7 @@ import config
 from core import network_id
 
 CHAIN_PAGE_LIMIT = getattr(config, "CHAIN_PAGE_LIMIT", 500)
+logger = logging.getLogger(__name__)
 
 
 class PeerNetwork:
@@ -47,7 +49,10 @@ class PeerNetwork:
         onion = self._normalize(onion)
         if onion and onion != self.my_onion and onion.endswith(".onion"):
             with self._lock:
+                is_new = onion not in self.peers
                 self.peers.add(onion)
+            if is_new:
+                logger.info("new peer: %s", onion)
         self.save_peers()
 
     def peer_list(self):
@@ -94,10 +99,11 @@ class PeerNetwork:
         if repeat:
             return
         if backoff_s:
-            print(f"sync: peer {onion[:12]}... unreachable ({reason}); "
-                  f"retrying in {backoff_s}s")
+            logger.warning(
+                "sync: peer %s... unreachable (%s); retrying in %ss",
+                onion[:12], reason, backoff_s)
         else:
-            print(f"sync: peer {onion[:12]}... {reason}")
+            logger.warning("sync: peer %s... %s", onion[:12], reason)
 
     def peer_status(self):
         with self._lock:
@@ -258,6 +264,8 @@ class PeerNetwork:
             if blocks is None:
                 self._note_fail(onion, "incomplete chain sync")
             elif self.blockchain.adopt_chain(blocks):
+                logger.info("adopted chain from %s: height %d -> %d",
+                            onion[:12], local_height, len(blocks))
                 self._note_ok(onion, max(remote_height, len(blocks)))
                 self.broadcast_chain(blocks)
                 self.broadcast_block(blocks[-1])

@@ -1,6 +1,7 @@
 import time
 import hashlib
 import json
+import logging
 import pickle
 import threading
 from pathlib import Path
@@ -10,6 +11,8 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidSignature
 
 import config
+
+logger = logging.getLogger(__name__)
 
 TRANSACTION_FEE = 1.0
 RETARGET_FACTOR = 4
@@ -232,8 +235,8 @@ class Blockchain:
             if getattr(instance, "_lock", None) is None:
                 instance._lock = threading.Lock()
             if not instance.is_chain_valid():
-                print("stored chain invalid on load; "
-                      "starting fresh from deterministic genesis")
+                logger.warning("stored chain invalid on load; "
+                               "starting fresh from deterministic genesis")
                 return cls(chain_file=chain_file)
             return instance
         except Exception:

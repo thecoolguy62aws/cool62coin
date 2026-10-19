@@ -1,9 +1,12 @@
+import logging
 import os
 import subprocess
 import time
 from pathlib import Path
 
 import config
+
+logger = logging.getLogger(__name__)
 
 
 class TorDaemon:
@@ -51,14 +54,21 @@ class TorDaemon:
         self.pid_file.write_text(str(self.process.pid))
         hostname_file = self.hidden_dir / "hostname"
         deadline = time.time() + self.timeout
+        logger.info("tor: waiting for hidden service to publish (pid %d)",
+                    self.process.pid)
         while time.time() < deadline:
             if hostname_file.exists():
                 self.hostname = hostname_file.read_text().strip()
+                logger.info("tor: hidden service published")
                 return self.hostname
             if self.process.poll() is not None:
+                logger.warning("tor: daemon exited before publishing "
+                               "(pid %d)", self.process.pid)
                 break
             time.sleep(0.5)
         self.stop()
+        logger.warning("tor: failed to publish a hidden service within %ds",
+                       self.timeout)
         raise TimeoutError("tor failed to publish a hidden service")
 
     def stop(self):
