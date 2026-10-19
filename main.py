@@ -11,7 +11,7 @@ from waitress import serve
 from flask import Flask, request, jsonify, g
 
 import config
-from core import Blockchain, network_id, CHAIN_FILE
+from core import Blockchain, network_id, CHAIN_FILE, is_valid_address
 from p2p import PeerNetwork
 from torlaunch import TorDaemon
 
@@ -76,6 +76,12 @@ def transaction():
 
     if not all(isinstance(v, str) and v for v in (sender, receiver, signature)):
         return jsonify(success=False, error="sender, receiver and signature must be non-empty strings"), 400
+
+    if not is_valid_address(sender):
+        return jsonify(success=False, error="sender is not a valid address"), 400
+
+    if not is_valid_address(receiver):
+        return jsonify(success=False, error="receiver is not a valid address"), 400
 
     if isinstance(amount, bool) or not isinstance(amount, (int, float)):
         return jsonify(success=False, error="amount must be a number"), 400

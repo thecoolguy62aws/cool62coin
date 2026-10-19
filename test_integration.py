@@ -129,12 +129,13 @@ def main():
         print("peers2:", peers2)
         print("mutual peer discovery: True")
 
-        from core import load_private_key, load_key_address, sign_transaction
+        from core import (load_private_key, load_key_address, sign_transaction,
+                          address_from_public_key)
         from cryptography.hazmat.primitives.asymmetric import ed25519
 
         miner = load_key_address()
         priv = load_private_key("private_key.pem")
-        target = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+        target = address_from_public_key(ed25519.Ed25519PrivateKey.generate().public_key())
 
         sig = sign_transaction(priv, miner, target, 10.0, 1)
         tx = {"sender": miner, "receiver": target, "amount": 10.0, "nonce": 1, "signature": sig}

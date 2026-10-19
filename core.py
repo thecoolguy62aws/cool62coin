@@ -18,15 +18,65 @@ TRANSACTION_FEE = 1.0
 RETARGET_FACTOR = 4
 TX_MEMO_MAX = getattr(config, "TX_MEMO_MAX", 512)
 
+ADDRESS_VERSION_RSA = "0"
+ADDRESS_VERSION_ED25519 = "1"
+ADDRESS_CHECKSUM_LEN = 8
+RSA_MODULUS_HEX_LEN = 512
+RSA_PUBLIC_EXPONENT = 65537
+ED25519_PUBLIC_HEX_LEN = 64
+_HEX_DIGITS = set("0123456789abcdef")
+
 DEFAULT_KEY_FILE = Path(__file__).with_name("public_key.pem")
 CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
 
+def _address_checksum(body):
+    return hashlib.sha256(body.encode()).hexdigest()[:ADDRESS_CHECKSUM_LEN]
+
+def encode_address(public_key):
+    if isinstance(public_key, rsa.RSAPublicKey):
+        modulus_hex = format(public_key.public_numbers().n, "x")
+        if len(modulus_hex) > RSA_MODULUS_HEX_LEN:
+            raise ValueError("unsupported RSA key size")
+        body = ADDRESS_VERSION_RSA + modulus_hex.rjust(RSA_MODULUS_HEX_LEN, "0")
+    elif isinstance(public_key, ed25519.Ed25519PublicKey):
+        raw_hex = public_key.public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        ).hex()
+        body = ADDRESS_VERSION_ED25519 + raw_hex
+    else:
+        raise ValueError("unsupported public key type")
+    return body + _address_checksum(body)
+
+def decode_address(address):
+    if not isinstance(address, str) or len(address) <= ADDRESS_CHECKSUM_LEN:
+        raise ValueError("address must be a non-empty string")
+    if any(c not in _HEX_DIGITS for c in address):
+        raise ValueError("address must be lowercase hex")
+    body, checksum = address[:-ADDRESS_CHECKSUM_LEN], address[-ADDRESS_CHECKSUM_LEN:]
+    if _address_checksum(body) != checksum:
+        raise ValueError("address checksum mismatch")
+    version, payload = body[0], body[1:]
+    if version == ADDRESS_VERSION_RSA:
+        if len(payload) != RSA_MODULUS_HEX_LEN:
+            raise ValueError("invalid RSA address length")
+        numbers = rsa.RSAPublicNumbers(RSA_PUBLIC_EXPONENT, int(payload, 16))
+        return numbers.public_key()
+    if version == ADDRESS_VERSION_ED25519:
+        if len(payload) != ED25519_PUBLIC_HEX_LEN:
+            raise ValueError("invalid Ed25519 address length")
+        return ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload))
+    raise ValueError(f"unknown address version {version!r}")
+
+def is_valid_address(address):
+    try:
+        decode_address(address)
+        return True
+    except (ValueError, TypeError):
+        return False
+
 def address_from_public_key(public_key):
-    der = public_key.public_bytes(
-        encoding=serialization.Encoding.DER,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-    return der.hex()
+    return encode_address(public_key)
 
 def load_key_address(path=None):
     key_file = Path(path) if path else DEFAULT_KEY_FILE
@@ -59,28 +109,28 @@ def tx_signing_payload(sender, receiver, amount, nonce, memo=None):
     return json.dumps(payload, sort_keys=True).encode()
 
 def verify_transaction(sender, signature, transaction_string):
-    signature_bytes = bytes.fromhex(signature)
-    sender_bytes = bytes.fromhex(sender)
+    try:
+        public_key = decode_address(sender)
+        signature_bytes = bytes.fromhex(signature)
+    except (ValueError, TypeError):
+        return False
 
     try:
-        public_key = serialization.load_der_public_key(sender_bytes)
-        public_key.verify(
-            signature_bytes,
-            transaction_string,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH
-            ),
-            hashes.SHA256()
-        )
+        if isinstance(public_key, rsa.RSAPublicKey):
+            public_key.verify(
+                signature_bytes,
+                transaction_string,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+        else:
+            public_key.verify(signature_bytes, transaction_string)
         return True
     except (InvalidSignature, ValueError):
-        try:
-            public_key = ed25519.Ed25519PublicKey.from_public_bytes(sender_bytes)
-            public_key.verify(signature_bytes, transaction_string)
-            return True
-        except (InvalidSignature, ValueError):
-            return False
+        return False
 
 def sign_transaction(private_key, sender, receiver, amount, nonce=0, memo=None):
     memo = _validated_memo(memo)
@@ -195,7 +245,7 @@ def solve_block(candidate, yield_every=1024, nonce_start=0, stride=1,
     return block.to_dict()
 
 class Blockchain:
-    _schema_version = 4
+    _schema_version = 5
 
     def __init__(self, difficulty=config.DIFFICULTY, reward=config.REWARD,
                  miner_address=None, chain_file=CHAIN_FILE):
