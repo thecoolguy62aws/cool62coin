@@ -4,7 +4,7 @@ import time
 
 import requests
 
-from core import load_key_address, load_private_key, sign_transaction
+from core import load_key_address, load_private_key, sign_transaction, is_valid_address
 
 DEFAULT_NODE = "http://127.0.0.1:8090"
 DEFAULT_KEY = "private_key.pem"
@@ -48,6 +48,9 @@ def cmd_send(args):
     amount = _amount(args.amount)
     memo = getattr(args, "memo", None) or None
     node_url = args.node
+
+    if not is_valid_address(receiver):
+        sys.exit("error: receiver is not a valid address")
 
     from_address = load_key_address()
     private_key = load_private_key(args.key)

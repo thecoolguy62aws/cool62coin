@@ -7,7 +7,9 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from core import (Block, Blockchain, MiningInterrupted, solve_block,
-                  load_private_key, load_key_address, sign_transaction)
+                  load_private_key, load_key_address, sign_transaction,
+                  verify_transaction, tx_signing_payload,
+                  address_from_public_key, decode_address, is_valid_address)
 
 DIFF = 3
 TARGET = (1 << 256) // DIFF
@@ -22,7 +24,7 @@ def main():
     try:
         miner = load_key_address()
         priv = load_private_key("private_key.pem")
-        target = ed25519.Ed25519PrivateKey.generate().public_key().public_bytes_raw().hex()
+        target = address_from_public_key(ed25519.Ed25519PrivateKey.generate().public_key())
 
         bc = Blockchain(difficulty=DIFF, miner_address=miner,
                         chain_file=Path(tmpdir) / "chain.pkl")
@@ -151,6 +153,34 @@ def main():
         big = 1 << 30
         tight = [mk(i, big, 1000 + i * 3.75) for i in range(R)]  # span 15s
         assert bc.difficulty_at_next(tight) == min(big * 4, cfg.MAX_DIFFICULTY)
+
+        # ------- address encoding checks -------
+        rsa_addr = address_from_public_key(priv.public_key())
+        assert len(rsa_addr) == 1 + 512 + 8 and rsa_addr[0] == "0", rsa_addr[:8]
+        assert is_valid_address(rsa_addr)
+        assert address_from_public_key(decode_address(rsa_addr)) == rsa_addr, \
+            "RSA address must round-trip"
+
+        ed_priv = ed25519.Ed25519PrivateKey.generate()
+        ed_addr = address_from_public_key(ed_priv.public_key())
+        assert len(ed_addr) == 1 + 64 + 8 and ed_addr[0] == "1", ed_addr[:8]
+        assert is_valid_address(ed_addr)
+        assert address_from_public_key(decode_address(ed_addr)) == ed_addr, \
+            "Ed25519 address must round-trip"
+
+        ed_sig = sign_transaction(ed_priv, ed_addr, rsa_addr, 1.0, 7)
+        assert verify_transaction(ed_addr, ed_sig,
+                                  tx_signing_payload(ed_addr, rsa_addr, 1.0, 7)), \
+            "Ed25519 signature must verify against a decoded address"
+
+        flipped = ("0" if rsa_addr[-1] != "0" else "1")
+        assert not is_valid_address(rsa_addr[:-1] + flipped), \
+            "checksum tampering must be rejected"
+        assert not is_valid_address("x" + rsa_addr[1:]), "non-hex must be rejected"
+        assert not is_valid_address("2" + rsa_addr[1:]), "unknown version must be rejected"
+        assert not is_valid_address("1" + rsa_addr[1:]), "wrong payload length must be rejected"
+        legacy = "30820122300d06092a864886f70d01010105000382010f003082010a0282010100"
+        assert not is_valid_address(legacy), "legacy DER address must be rejected"
 
         # ------- memo field checks -------
         bc2 = Blockchain(difficulty=DIFF, miner_address=miner,
