@@ -1,17 +1,21 @@
 import argparse
 import hashlib
 import json
+import logging
+import sys
 import threading
 import time
 from pathlib import Path
 
 from waitress import serve
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 
 import config
-from core import Blockchain, network_id
+from core import Blockchain, network_id, CHAIN_FILE
 from p2p import PeerNetwork
 from torlaunch import TorDaemon
+
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 blockchain = None
@@ -20,6 +24,24 @@ my_onion = ""
 peer_net = None
 
 CHAIN_PAGE_MAX = getattr(config, "CHAIN_PAGE_MAX", 1000)
+
+
+@app.before_request
+def _request_started():
+    g._started_at = time.monotonic()
+
+
+@app.after_request
+def _log_request(response):
+    if request.method == "GET" and response.status_code < 400:
+        return response
+    started = getattr(g, "_started_at", None)
+    elapsed_ms = (time.monotonic() - started) * 1000 if started else 0.0
+    target = request.full_path if request.query_string else request.path
+    level = logging.WARNING if response.status_code >= 400 else logging.INFO
+    logger.log(level, "%s %s -> %s (%.1fms)", request.method, target,
+               response.status_code, elapsed_ms)
+    return response
 
 
 @app.get("/")
@@ -69,6 +91,8 @@ def transaction():
     already = blockchain.mempool_has(tx)
     if not blockchain.add_transaction(sender, receiver, amount, signature, nonce):
         return jsonify(success=False, error="transaction rejected: bad signature, invalid address or insufficient funds"), 400
+    logger.info("accepted tx %s %s->%s amount=%s",
+                blockchain.tx_id(tx)[:8], sender[:8], receiver[:8], amount)
     if not already:
         threading.Thread(target=peer_net.on_local_tx, args=(tx,), daemon=True).start()
     return jsonify(success=True), 201
@@ -87,6 +111,9 @@ def balance():
 def block():
     data = request.get_json(silent=True) or {}
     if blockchain.add_block(data):
+        logger.info("accepted block #%s %s (txs=%d)",
+                    data.get("index"), str(data.get("hash"))[:8],
+                    len(data.get("transactions") or []))
         threading.Thread(target=peer_net.broadcast_block, args=(data,),
                          daemon=True).start()
         return jsonify(success=True), 200
@@ -126,7 +153,10 @@ def upload_chain():
     blocks = data.get("blocks")
     if not isinstance(blocks, list) or not blocks:
         return jsonify(success=False, error="missing blocks"), 400
+    previous_height = blockchain.height
     if blockchain.adopt_chain(blocks):
+        logger.info("adopted chain from peer: height %d -> %d",
+                    previous_height, len(blocks))
         threading.Thread(target=peer_net.broadcast_chain, args=(blocks,),
                          daemon=True).start()
         return jsonify(success=True), 200
@@ -221,11 +251,30 @@ def main():
     parser.add_argument("--tor", default=str(config.TOR_BIN))
     parser.add_argument("--chain", default=None)
     parser.add_argument("--sync-interval", type=int, default=config.SYNC_INTERVAL)
+    parser.add_argument("--log-level", default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
 
-    global my_onion, peer_net, blockchain
-    blockchain = Blockchain.load(args.chain)
+    logging.basicConfig(
+        level=args.log_level, stream=sys.stdout,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
+    global my_onion, peer_net, blockchain
+    chain_path = Path(args.chain) if args.chain else CHAIN_FILE
+    had_chain = chain_path.exists()
+    blockchain = Blockchain.load(args.chain)
+    if had_chain:
+        logger.info("loaded chain height=%d tip=%s genesis=%s",
+                    blockchain.height, blockchain.last_block.hash[:8],
+                    blockchain.chain[0].hash[:8])
+    else:
+        logger.info("no stored chain; mined genesis %s",
+                    blockchain.chain[0].hash[:8])
+
+    logger.info("starting Tor hidden service (data=%s, socks=%d, port=%d)",
+                args.data, args.socks, args.port)
     tor = TorDaemon(
         data_dir=args.data,
         socks_port=args.socks,
@@ -233,6 +282,7 @@ def main():
         tor_bin=args.tor,
     )
     my_onion = tor.start()
+    logger.info("hidden service ready: %s", my_onion)
 
     peer_net = PeerNetwork(
         blockchain=blockchain,
@@ -241,13 +291,17 @@ def main():
         socks_port=args.socks,
         sync_interval=args.sync_interval,
     )
+    logger.info("known peers (%d): %s", len(peer_net.peers),
+                ", ".join(sorted(peer_net.peers)) or "-")
 
     threading.Thread(target=peer_net.run, daemon=True).start()
 
     try:
+        logger.info("listening on 127.0.0.1:%d network_id=%s reward=%s",
+                    args.port, network_id()[:8], blockchain.reward)
         serve(app, host="127.0.0.1", port=args.port)
     except KeyboardInterrupt:
-        print("\nshutting down...")
+        logger.info("shutting down...")
     finally:
         tor.stop()
 
