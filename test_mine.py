@@ -123,8 +123,8 @@ def main():
         # ------- difficulty retarget unit checks (no commits, synthetic) -------
         import config as cfg
         R = cfg.RETARGET_INTERVAL
-        assert cfg.TARGET_BLOCK_TIME == 30 and R == 5
-        target_window = R * cfg.TARGET_BLOCK_TIME  # 150s
+        assert cfg.TARGET_BLOCK_TIME == 120 and R == 5
+        target_window = R * cfg.TARGET_BLOCK_TIME  # 600s
 
         def mk(idx, diff, ts):
             return Block(index=idx, transactions=[], previous_hash="0" * 64,
@@ -136,9 +136,9 @@ def main():
         assert bc.difficulty_at_next(no_retarget) == base, \
             "difficulty must not change between retarget boundaries"
 
-        slow = [mk(i, base, 1000 + i * 75) for i in range(R)]  # span 300s
+        slow = [mk(i, base, 1000 + i * 300) for i in range(R)]  # span 1200s
         slow_next = bc.difficulty_at_next(slow)
-        assert slow_next == base // 2, slow_next  # halves towards 150s window
+        assert slow_next == base // 2, slow_next  # halves towards 600s window
 
         fast = [mk(i, base, 1000 + i * 7.5) for i in range(R)]  # span 30s
         fast_next = bc.difficulty_at_next(fast)
