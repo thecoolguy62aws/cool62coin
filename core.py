@@ -276,6 +276,27 @@ class Blockchain:
     def height(self):
         return len(self.chain)
 
+    def chain_page(self, from_index=0, limit=None):
+        with self._lock:
+            chain = self.chain
+            height = len(chain)
+            start = max(0, min(from_index, height))
+            end = height if limit is None else min(height, start + max(0, limit))
+            blocks = [block.to_dict() for block in chain[start:end]]
+            genesis = chain[0].hash if chain else None
+            tip = chain[-1].hash if chain else None
+        has_more = end < height
+        return {
+            "height": height,
+            "from_index": start,
+            "count": len(blocks),
+            "blocks": blocks,
+            "genesis": genesis,
+            "tip": tip,
+            "has_more": has_more,
+            "next_from": end if has_more else None,
+        }
+
     def tx_id(self, tx):
         canonical = json.dumps(tx, sort_keys=True)
         return hashlib.sha256(canonical.encode()).hexdigest()

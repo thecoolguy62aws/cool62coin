@@ -19,6 +19,8 @@ blockchain = None
 my_onion = ""
 peer_net = None
 
+CHAIN_PAGE_MAX = getattr(config, "CHAIN_PAGE_MAX", 1000)
+
 
 @app.get("/")
 def index():
@@ -29,7 +31,7 @@ def index():
             "POST /transaction": "{sender, receiver, amount, signature, nonce}",
             "GET /balance": "?address=<hex public key>",
             "POST /block": "submit a fully-mined block",
-            "GET /chain": "full serialized chain",
+            "GET /chain": "serialized chain (?from_index=&limit= pages, else full)",
             "POST /chain": "adopt a full serialized chain",
             "GET /txpool": "unconfirmed transactions",
             "GET|POST /peers": "list or announce onion peers",
@@ -93,11 +95,29 @@ def block():
 
 @app.get("/chain")
 def chain():
-    return jsonify(
-        success=True,
-        height=len(blockchain.chain),
-        blocks=[b.to_dict() for b in blockchain.chain],
-    )
+    raw_from = request.args.get("from_index")
+    raw_limit = request.args.get("limit")
+
+    if raw_from is None and raw_limit is None:
+        page = blockchain.chain_page()
+        return jsonify(success=True, height=page["height"],
+                       blocks=page["blocks"])
+
+    try:
+        from_index = int(raw_from) if raw_from is not None else 0
+        limit = int(raw_limit) if raw_limit is not None else CHAIN_PAGE_MAX
+    except (TypeError, ValueError):
+        return jsonify(success=False,
+                       error="from_index and limit must be integers"), 400
+
+    if from_index < 0:
+        return jsonify(success=False, error="from_index must be >= 0"), 400
+    if limit < 1:
+        return jsonify(success=False, error="limit must be >= 1"), 400
+
+    limit = min(limit, CHAIN_PAGE_MAX)
+    page = blockchain.chain_page(from_index, limit)
+    return jsonify(success=True, **page)
 
 
 @app.post("/chain")
@@ -142,6 +162,7 @@ def info():
         network_id=network_id(),
         genesis=blockchain.chain[0].hash,
         tip=blockchain.last_block.hash,
+        chain_page_max=CHAIN_PAGE_MAX,
     )
 
 
