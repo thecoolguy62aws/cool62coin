@@ -93,7 +93,7 @@ def cmd_status(args):
 
 
 def interactive(args):
-    print(f"interactive wallet - node {args.node} (type 'help' for commands)")
+    print(f"interactive cool62coin wallet - node {args.node} (type 'help' for commands)")
     while True:
         try:
             line = input("wallet> ").strip()
