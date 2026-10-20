@@ -211,8 +211,7 @@ def main():
     parser.add_argument("--node", default=DEFAULT_NODE, help=f"local node API base URL (default {DEFAULT_NODE})")
 
     args = parser.parse_args()
-    if args.command is None:
-        interactive(args)
+    interactive(args)
 
 if __name__ == "__main__":
     main()
