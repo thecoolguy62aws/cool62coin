@@ -213,14 +213,6 @@ def main():
 
     sub.add_parser("address", help="print this node's wallet address")
 
-    p = sub.add_parser("balance", help="show a balance (default: own)")
-    p.add_argument("address", nargs="?", default=None, help="address to query (default: wallet key)")
-
-    p = sub.add_parser("send", help="sign and send a transaction")
-    p.add_argument("receiver", help="receiver address (hex public key)")
-    p.add_argument("amount", help="amount to send")
-    p.add_argument("memo", nargs="?", default=None, help="optional memo (max 512 UTF-8 bytes)")
-
     args = parser.parse_args()
     if args.command is None:
         interactive(args)
