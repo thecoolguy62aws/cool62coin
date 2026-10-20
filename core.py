@@ -5,12 +5,18 @@ import logging
 import pickle
 import threading
 from pathlib import Path
+import shutil
 
 from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidSignature
 
-import config
+try:
+    import config
+except ImportError:
+    if not Path("config.py").is_file():
+        shutil.copyfile("config_example/config.py", "config.py")
+    import config
 
 logger = logging.getLogger(__name__)
 

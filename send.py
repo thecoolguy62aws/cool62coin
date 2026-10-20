@@ -1,6 +1,10 @@
 import argparse
 import sys
+import os
 import time
+from pathlib import Path
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 import requests
 
@@ -9,6 +13,32 @@ from core import load_key_address, load_private_key, sign_transaction, is_valid_
 DEFAULT_NODE = "http://127.0.0.1:8090"
 DEFAULT_KEY = "private_key.pem"
 
+def _wait_for_key(prompt):
+    print(prompt, end="", flush=True)
+    
+    if os.name == 'nt':
+        import msvcrt
+        char = msvcrt.getwch() 
+    else:
+        import termios
+        import tty
+        
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            char = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+            
+    print("\r" + " " * len(prompt) + "\r", end="", flush=True)
+    return char
+
+def _clear_console():
+    if os.name == 'nt':
+        os.system("cls")
+    else:
+        os.system("clear")
 
 def _node(base, path, method="GET", body=None):
     try:
@@ -93,6 +123,51 @@ def cmd_status(args):
 
 
 def interactive(args):
+    if not Path("private_key.pem").is_file():
+        _clear_console()
+        print("Hello! It looks like you're new here. Lets get cool62coin set up for you.")
+        print("By continuing, you agree that this software is provided as is and the creators of this tool are not liable for and provide no warranty for any losses or damages, to the extent permitted by applicable law.")
+        _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+        print("First, we'll generate a key pair for you. Your keys will be saved in private_key.pem and public_key.pem. \033[1mNEVER\033[0m share your private key with \033[1mANYONE\033[0m.")
+        _wait_for_key("\n\033[3mPress any key to create a key pair...\033[0m")
+        if Path("private_key.pem").is_file() or Path("public_key.pem").is_file():
+            if Path("private_key.pem").is_file() and Path("public_key.pem").is_file():
+                print("You already have a keypair. You're good to go!")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                _clear_console()
+            elif Path("public_key.pem").is_file():
+                print("It seems you already have a public key saved. Since removing it could cause loss of data, I'll stop and let you choose how to continue.")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                _clear_console()
+                sys.exit(1)
+            elif Path("private_key.pem").is_file():
+                print("I found a private key already existing here. I'll let you choose how to continue.")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                _clear_console()
+                sys.exit(1)
+        else:
+            print("Creating your keys now... ", end='')
+            new_private_key = ed25519.Ed25519PrivateKey.generate()
+            new_public_key = new_private_key.public_key()
+            with open("private_key.pem", "wb") as priv_file:
+                priv_file.write(
+                    new_private_key.private_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PrivateFormat.PKCS8,
+                        encryption_algorithm=serialization.NoEncryption()
+                    )
+                )
+            with open("public_key.pem", "wb") as pub_file:
+                pub_file.write(
+                    new_public_key.public_bytes(
+                        encoding=serialization.Encoding.PEM,
+                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                    )
+                )
+            print("Done!")
+            _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+            print("You're almost all set up to use cool62coin. Now, we'll send you to the interactive wallet, where you can type 'help' to learn the commands.")
+            _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
     print(f"interactive cool62coin wallet - node {args.node} (type 'help' for commands)")
     while True:
         try:
