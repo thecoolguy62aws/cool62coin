@@ -149,13 +149,6 @@ def main():
     args = parser.parse_args()
     if args.command is None:
         interactive(args)
-    elif args.command == "address":
-        cmd_address(args)
-    elif args.command == "balance":
-        cmd_balance(args)
-    elif args.command == "send":
-        cmd_send(args)
-
 
 if __name__ == "__main__":
     main()
