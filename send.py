@@ -96,7 +96,7 @@ def interactive(args):
     print(f"interactive cool62coin wallet - node {args.node} (type 'help' for commands)")
     while True:
         try:
-            line = input("wallet> ").strip()
+            line = input("C62> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
