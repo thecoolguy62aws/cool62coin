@@ -134,7 +134,6 @@ def interactive(args):
 def main():
     parser = argparse.ArgumentParser(description="blockchain wallet CLI (interactive by default)")
     parser.add_argument("--node", default=DEFAULT_NODE, help=f"local node API base URL (default {DEFAULT_NODE})")
-    parser.add_argument("--key", default=DEFAULT_KEY, help=f"private key file (default {DEFAULT_KEY})")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("address", help="print this node's wallet address")
