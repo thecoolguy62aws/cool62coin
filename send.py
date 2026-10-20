@@ -70,7 +70,7 @@ def cmd_address(args):
 def cmd_balance(args):
     address = args.address or load_key_address()
     data = _node(args.node, f"/balance?address={address}")
-    print(f"{address}\nbalance: {data['balance']}")
+    print(f"{address}\nbalance: {int(data['balance']) if data['balance'].is_integer() else data['balance']}")
 
 
 def cmd_send(args):
@@ -101,7 +101,7 @@ def cmd_send(args):
         tx["memo"] = memo
 
     from_path = args.node.replace("http://", "").replace("https://", "")
-    print(f"sending {amount} to {receiver[:16]}... from {from_address[:16]} at {from_path}")
+    print(f"sending {int(amount) if amount.is_integer() else amount} to {receiver[:16]}... from {from_address[:16]} at {from_path}")
     _node(args.node, "/transaction", method="POST", body=tx)
     print(f"tx accepted (nonce {nonce}); it will enter the next mined block")
 
