@@ -6,26 +6,22 @@
 
 1. Clone this repo onto your machine.
 2. Install dependencies: `pip install requests flask cryptography pyopencl waitress`.
-3. Move `config.py` in `config_example/` to the root directory.
-4. Put a copy of `tor.exe` in the root directory.
-5. Run `gen_keys.py` to generate your wallet address.
-6. Place a known bootstrap onion in `peers.txt`.
-7. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will be nearly instant. Wait for some logs to start printing before continuing. 
+3. Put a copy of `tor.exe` in the root directory.
+4. Place a known bootstrap onion in `peers.txt`.
+5. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will be nearly instant. Wait for some logs to start printing before continuing.
 
 ### Linux, Darwin, and other Unix-like kernels.
 
 1. Clone this repo onto your machine.
 2. Install dependancies: either `sudo apt install python3-pip python3-requests python3-flask python3-cryptography tor python3-pyopencl opencl-icd python3-waitress` or `pip install requests flask cryptography pyopencl waitress`.
-3. Move `config.py` in `config_example/` to the root directory.
-4. Run `gen_keys.py` to generate your wallet address.
-5. Place a known bootstrap onion in `peers.txt`.
-6. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will be nearly instant. Wait for some logs to start printing before continuing. 
+3. Place a known bootstrap onion in `peers.txt`.
+4. Run `main.py` to start your node. On the first startup it will mine the genesis block. This will be nearly instant. Wait for some logs to start printing before continuing. 
 
 ## Basic Usage
 
 **`main.py` MUST be running for any of this to work!**
 
-`send.py` is an interactive CLI that can be used to make transactions and check your balance.
+`send.py` is an interactive CLI that can be used to make transactions and check your balance. When you run it the first time, it will help you set up cool62coin.
 
 ## Advanced Usage (mining)
 
