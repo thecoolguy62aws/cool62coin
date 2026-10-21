@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from mnemonic import Mnemonic
 
 import requests
 
@@ -124,50 +125,104 @@ def cmd_status(args):
 
 def interactive(args):
     if not Path("private_key.pem").is_file():
+        mnemo = Mnemonic("english")
         _clear_console()
         print("Hello! It looks like you're new here. Lets get cool62coin set up for you.")
         print("By continuing, you agree that this software is provided as is and the creators of this tool are not liable for and provide no warranty for any losses or damages, to the extent permitted by applicable law.")
         _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
-        print("First, we'll generate a key pair for you. Your keys will be saved in private_key.pem and public_key.pem. \033[1mNEVER\033[0m share your private key with \033[1mANYONE\033[0m.")
-        _wait_for_key("\n\033[3mPress any key to create a key pair...\033[0m")
-        if Path("private_key.pem").is_file() or Path("public_key.pem").is_file():
-            if Path("private_key.pem").is_file() and Path("public_key.pem").is_file():
-                print("You already have a keypair. You're good to go!")
-                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
-                _clear_console()
-            elif Path("public_key.pem").is_file():
-                print("It seems you already have a public key saved. Since removing it could cause loss of data, I'll stop and let you choose how to continue.")
-                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
-                _clear_console()
-                sys.exit(1)
-            elif Path("private_key.pem").is_file():
-                print("I found a private key already existing here. I'll let you choose how to continue.")
+        seed = input("Do you have a seed phrase? If you do, type it now. If you don't have one and want to make a new wallet or don't know what this means, press enter without typing anything.\n> ")
+        print()
+        if seed.strip():
+            try:
+                restored_bytes = mnemo.to_entropy(seed)
+            except:
+                print("This seed phrase is invalid.")
                 _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
                 _clear_console()
                 sys.exit(1)
+                
+            restored_private_key = ed25519.Ed25519PrivateKey.from_private_bytes(restored_bytes)
+            restored_public_key = restored_private_key.public_key()
+            
+            if Path("private_key.pem").is_file() or Path("public_key.pem").is_file():
+                print("It looks like you already have keys saved! Since removing them could cause you to lose data, I'll stop and let you choose how to proceed.")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                _clear_console()
+                sys.exit(1)
+            else:
+                with open("private_key.pem", "wb") as priv_file:
+                    priv_file.write(
+                        restored_private_key.private_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PrivateFormat.PKCS8,
+                            encryption_algorithm=serialization.NoEncryption()
+                        )
+                    )
+
+                with open("public_key.pem", "wb") as pub_file:
+                    pub_file.write(
+                        restored_public_key.public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo
+                        )
+                    )
+                    
+                print("We successfully restored your wallet! You will now be redirected to the interactive wallet.")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+            
         else:
-            print("Creating your keys now... ", end='')
-            new_private_key = ed25519.Ed25519PrivateKey.generate()
-            new_public_key = new_private_key.public_key()
-            with open("private_key.pem", "wb") as priv_file:
-                priv_file.write(
-                    new_private_key.private_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PrivateFormat.PKCS8,
-                        encryption_algorithm=serialization.NoEncryption()
+            print("First, we'll generate a key pair for you. Your keys will be saved in private_key.pem and public_key.pem.")
+            _wait_for_key("\n\033[3mPress any key to create a key pair...\033[0m")
+            if Path("private_key.pem").is_file() or Path("public_key.pem").is_file():
+                if Path("private_key.pem").is_file() and Path("public_key.pem").is_file():
+                    print("You already have a keypair. You're good to go!")
+                    _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                    _clear_console()
+                elif Path("public_key.pem").is_file():
+                    print("It seems you already have a public key saved. Since removing it could cause loss of data, I'll stop and let you choose how to continue.")
+                    _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                    _clear_console()
+                    sys.exit(1)
+                elif Path("private_key.pem").is_file():
+                    print("I found a private key already existing here. I'll let you choose how to continue.")
+                    _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                    _clear_console()
+                    sys.exit(1)
+            else:
+                print("Creating your keys now... ", end='')
+                new_private_key = ed25519.Ed25519PrivateKey.generate()
+                new_public_key = new_private_key.public_key()
+                with open("private_key.pem", "wb") as priv_file:
+                    priv_file.write(
+                        new_private_key.private_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PrivateFormat.PKCS8,
+                            encryption_algorithm=serialization.NoEncryption()
+                        )
                     )
-                )
-            with open("public_key.pem", "wb") as pub_file:
-                pub_file.write(
-                    new_public_key.public_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PublicFormat.SubjectPublicKeyInfo
+                with open("public_key.pem", "wb") as pub_file:
+                    pub_file.write(
+                        new_public_key.public_bytes(
+                            encoding=serialization.Encoding.PEM,
+                            format=serialization.PublicFormat.SubjectPublicKeyInfo
+                        )
                     )
-                )
-            print("Done!")
-            _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
-            print("You're almost all set up to use cool62coin. Now, we'll send you to the interactive wallet, where you can type 'help' to learn the commands.")
-            _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                private_bytes = new_private_key.private_bytes_raw()
+                mnemonic_phrase = mnemo.to_mnemonic(private_bytes)
+                print("Done!")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                print("Now, just in case your key files get lost, you will save your seed phrase. With these 24 words, you can restore your cool62coin wallet if your keys get lost. NEVER under ANY circumstances share this phrase with ANYONE.")
+                _wait_for_key("\n\033[3mPress any key to show your seed phrase...\033[0m")
+                print("Make sure to save your seed phrase IN ORDER. If you lose your keys and words, it is IMPOSSIBLE to recover your wallet. Seed phrase:")
+                #mnemonic_phrase_words = mnemonic_phrase.split()
+                #for i in range(12):
+                #    print(f"{str(i+1) if i>8 else " " + str(i+1)}: {mnemonic_phrase_words[i]}{" "*(12-len(mnemonic_phrase_words[i]))}{i+13}: {mnemonic_phrase_words[i+12]}")
+                print(mnemonic_phrase)
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                print("If you didn't save your seed phrase, do so now.")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
+                print("You're almost all set up to use cool62coin. Now, we'll send you to the interactive wallet, where you can type 'help' to learn the commands.")
+                _wait_for_key("\n\033[3mPress any key to continue...\033[0m")
     print(f"interactive cool62coin wallet - node {args.node} (type 'help' for commands)")
     while True:
         try:
