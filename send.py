@@ -208,9 +208,22 @@ def interactive(args):
 
 def main():
     parser = argparse.ArgumentParser(description="blockchain wallet CLI (interactive by default)")
-    parser.add_argument("--node", default=DEFAULT_NODE, help=f"local node API base URL (default {DEFAULT_NODE})")
+    parser.add_argument("--node", default="auto", help=f"local node API base URL (default {DEFAULT_NODE})")
 
     args = parser.parse_args()
+    
+    if args.node == "auto":
+        try:
+            response = requests.head(DEFAULT_NODE, timeout=3)
+            
+            if response:
+                print(f"Using local node")
+                args.node = DEFAULT_NODE
+                
+        except requests.exceptions.RequestException as e:
+            print(f"Local node not detected. Using https://coinnode.cool62.net/")
+            args.node = "https://coinnode.cool62.net/"
+    
     interactive(args)
 
 if __name__ == "__main__":
