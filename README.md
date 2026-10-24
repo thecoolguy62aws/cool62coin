@@ -1,5 +1,9 @@
 # cool62coin
 
+## About
+
+cool62coin is a decentralized proof-of-work cryptocurrency that uses SHA-256.
+
 ## Setup
 
 ### Windows/NT
