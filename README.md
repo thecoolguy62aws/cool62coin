@@ -10,7 +10,7 @@ cool62coin is a decentralized proof-of-work cryptocurrency that uses SHA-256.
 
 1. Clone this repo onto your machine.
 2. Install dependencies: `pip install requests flask cryptography pyopencl waitress mnemonic`.
-3. Put a copy of `tor.exe` in the root directory.
+3. Put a copy of `tor.exe` in the root directory. You can get this file from [the official site](https://download.torproject.org/tor/).
 4. Place a known bootstrap onion in `peers.txt`. A good one to start is `7gmhrcj6agxizusdua6pceus3izrbcqb2dkloow2c3vzo5adqqruxcad.onion`.
 
 ### Linux, Darwin, and other Unix-like kernels.
