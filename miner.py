@@ -507,7 +507,7 @@ def submit(node, block):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Standalone blockchain miner")
+    parser = argparse.ArgumentParser(description="cool62coin Miner")
     parser.add_argument("--node", default=DEFAULT_NODE, help="local node base URL")
     parser.add_argument("--miner", default=None,
                         help="reward address (default: local node identity)")
