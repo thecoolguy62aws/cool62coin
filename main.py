@@ -258,7 +258,7 @@ def work():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Tor blockchain node")
+    parser = argparse.ArgumentParser(description="cool62coin Node")
     parser.add_argument("--port", type=int, default=config.INTERNAL_PORT)
     parser.add_argument("--socks", type=int, default=config.SOCKS_PORT)
     parser.add_argument("--data", default=str(config.DATA_DIR))

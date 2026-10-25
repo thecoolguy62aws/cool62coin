@@ -262,7 +262,7 @@ def interactive(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="blockchain wallet CLI (interactive by default)")
+    parser = argparse.ArgumentParser(description="cool62coin CLI Wallet")
     parser.add_argument("--node", default="auto", help=f"local node API base URL (default {DEFAULT_NODE})")
 
     args = parser.parse_args()
