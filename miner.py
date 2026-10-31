@@ -505,6 +505,17 @@ def submit(node, block):
         print(f"\n  submit failed: {e}")
         return None
 
+def build_empty_template(work):
+    """Create an empty block template when no transactions are available."""
+    return {
+        "index": work.get("index"),
+        "timestamp": work.get("timestamp"),
+        "transactions": [],
+        "previous_hash": work.get("previous_hash"),
+        "difficulty": work.get("difficulty"),
+        "miner": None,
+        "_is_empty": True,
+    }
 
 def main():
     parser = argparse.ArgumentParser(description="cool62coin Miner")
@@ -545,6 +556,7 @@ def main():
     engine = None
     active_key = None
     ignore_tid = None
+    is_mining_empty = None
     t0 = None
     last_stat = time.monotonic()
     shown_work = None
@@ -554,29 +566,47 @@ def main():
             snap = fetcher.snapshot()
             tid = snap[0] if snap else None
             work = snap[1] if snap else None
+            
             if ignore_tid is not None and tid is not None and tid != ignore_tid:
                 ignore_tid = None
-            need = bool(work and work.get("pending") and work.get("transactions"))
+            
+            # Generate empty template if no transactions available
+            template = None
+            is_empty_template = False
+            if work:  # CHANGED: removed work.get("pending") check
+                if work.get("transactions"):
+                    template = work
+                    is_empty_template = False
+                else:
+                    template = build_empty_template(work)
+                    is_empty_template = True
+            
             if tid == ignore_tid:
-                need = False
+                template = None
+            
             work_key = None
-            if work is not None:
-                work_key = (work.get("index"), work.get("previous_hash"),
-                            work.get("difficulty"))
+            if template is not None:
+                work_key = (template.get("index"), template.get("previous_hash"),
+                            template.get("difficulty"))
 
+            # Stop mining if chain changed
             if engine is not None and work_key != active_key:
                 print("\n  chain state changed; rebasing to the new tip")
                 engine.stop()
                 engine = None
                 active_key = None
                 t0 = None
+                is_mining_empty = None
 
-            if engine is None and need:
-                candidate = build_candidate(work, miner_address)
+            # Start mining if template available and not currently mining
+            if engine is None and template is not None:
+                candidate = build_candidate(template, miner_address)
                 shown_work = candidate
+                tx_count = len(candidate['transactions'])
                 print(f"Mining block #{candidate['index']} "
                       f"difficulty={candidate['difficulty']} "
-                      f"txs={len(candidate['transactions'])}")
+                      f"txs={tx_count} "
+                      f"({'empty' if is_empty_template else 'with transactions'})")
                 if gpu_available and not args.cpu:
                     try:
                         engine = GpuEngine(candidate, args.batch)
@@ -592,6 +622,7 @@ def main():
                     engine = CpuEngine(candidate, args.threads)
                     print(f"  engine: CPU x{args.threads}")
                 active_key = work_key
+                is_mining_empty = is_empty_template
                 t0 = time.monotonic()
                 last_stat = time.monotonic()
 
@@ -608,10 +639,23 @@ def main():
                 engine = None
                 active_key = None
                 t0 = None
+                is_mining_empty = None
                 if result is not None:
                     ignore_tid = tid
                 time.sleep(1.0)
                 continue
+
+            if engine is not None and is_mining_empty and work and work.get("transactions"):
+                new_work_key = (work.get("index"), work.get("previous_hash"),
+                               work.get("difficulty"))
+                if new_work_key == active_key:
+                    print("\n  transactions arrived; switching to block with transactions")
+                    engine.stop()
+                    engine = None
+                    active_key = None
+                    t0 = None
+                    is_mining_empty = None
+                    continue
 
             now = time.monotonic()
             if t0 and now - last_stat >= 1.0:
@@ -633,7 +677,6 @@ def main():
             except BaseException:
                 pass
         fetcher.stop()
-
 
 def os_cpu_count():
     return multiprocessing.cpu_count()
