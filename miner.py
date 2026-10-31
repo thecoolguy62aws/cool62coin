@@ -524,7 +524,7 @@ def main():
                         help="reward address (default: local node identity)")
     parser.add_argument("--threads", type=int, default=os_cpu_count(),
                         help="CPU worker count (default: cpu_count)")
-    parser.add_argument("--interval", type=float, default=15.0,
+    parser.add_argument("--interval", type=float, default=10.0,
                         help="/work poll interval in seconds")
     parser.add_argument("--batch", type=int, default=DEFAULT_BATCH,
                         help="GPU work-items per launch")
