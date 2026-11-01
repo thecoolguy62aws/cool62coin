@@ -26,7 +26,8 @@ import time
 import requests
 
 import config
-from core import Block, load_key_address
+from core import (Block, POW_V2_ACTIVATION, POW_V2_NONCE_DIGITS,
+                  load_key_address, pow_v2_header_parts)
 
 DEFAULT_NODE = f"http://127.0.0.1:{config.INTERNAL_PORT}"
 DEFAULT_BATCH = 1 << 20
@@ -286,6 +287,12 @@ __kernel void sha256_search(
 
 
 def build_message(candidate):
+    if candidate["index"] >= POW_V2_ACTIVATION:
+        prefix, suffix = pow_v2_header_parts(
+            candidate["index"], candidate["timestamp"],
+            candidate["transactions"], candidate["previous_hash"],
+            candidate["miner"])
+        return prefix, suffix, POW_V2_NONCE_DIGITS
     body = {
         "index": candidate["index"],
         "timestamp": candidate["timestamp"],
@@ -297,7 +304,7 @@ def build_message(candidate):
     idx = s.index('"previous_hash"')
     prefix = (s[:idx] + '"nonce": ').encode("ascii")
     suffix = s[idx - 2:].encode("ascii")
-    return prefix, suffix
+    return prefix, suffix, None
 
 
 class GpuEngine:
@@ -325,7 +332,7 @@ class GpuEngine:
         except AttributeError:
             self.device_name = "unknown"
 
-        self.prefix, self.suffix = build_message(candidate)
+        self.prefix, self.suffix, self.fixed_digits = build_message(candidate)
         self.candidate = candidate
         self.difficulty = candidate["difficulty"]
         target = (1 << 256) // self.difficulty
@@ -357,6 +364,11 @@ class GpuEngine:
 
         self._verify_selftest()
 
+    def _format_nonce(self, nonce):
+        if self.fixed_digits:
+            return f"{nonce:0{self.fixed_digits}d}".encode("ascii")
+        return str(nonce).encode("ascii")
+
     def _verify_selftest(self):
         for k in (0, 123456789):
             block = Block(
@@ -368,12 +380,12 @@ class GpuEngine:
                 timestamp=self.candidate["timestamp"],
                 nonce=k,
             )
-            msg = self.prefix + str(k).encode("ascii") + self.suffix
+            msg = self.prefix + self._format_nonce(k) + self.suffix
             if hashlib.sha256(msg).hexdigest() != block.hash:
                 raise RuntimeError(
                     "GPU message layout does not match Block.calculate_hash")
         nonce = 123456789
-        digits = len(str(nonce))
+        digits = self.fixed_digits or len(str(nonce))
         dbg = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, 32)
         result = self.cl.Buffer(self.ctx, self.mf.READ_WRITE, 8)
         self._write_u32s(result, (0, 0xFFFFFFFF))
@@ -389,7 +401,7 @@ class GpuEngine:
         self.queue.finish()
         got = b"".join(int(w).to_bytes(4, "big") for w in self._read_u32s(dbg, 8))
         expected = hashlib.sha256(
-            self.prefix + str(nonce).encode("ascii") + self.suffix).digest()
+            self.prefix + self._format_nonce(nonce) + self.suffix).digest()
         if got != expected:
             raise RuntimeError("OpenCL kernel self-test failed; refusing GPU mining")
         if int(self._read_u32s(result, 2)[0]) != 0:
@@ -414,7 +426,7 @@ class GpuEngine:
             print("\nnonce space exhausted; restarting from 0")
             self._nonce = 0
         n = self._nonce
-        digits = len(str(n))
+        digits = self.fixed_digits or len(str(n))
         window = 10 ** digits - n
         seq = min(window, self.batch_size)
         start = n
@@ -448,14 +460,14 @@ class GpuEngine:
         nonce = start + idx
         if nonce < start or nonce >= start + seq:
             return None
-        msg = self.prefix + str(nonce).encode("ascii") + self.suffix
+        msg = self.prefix + self._format_nonce(nonce) + self.suffix
         digest = hashlib.sha256(msg).hexdigest()
         if not int(digest, 16) < self.target:
             print("\nGPU produced a bad nonce; searching CPU range...")
             for k in range(seq):
                 n = start + k
                 if int(hashlib.sha256(
-                        self.prefix + str(n).encode("ascii") + self.suffix
+                        self.prefix + self._format_nonce(n) + self.suffix
                 ).hexdigest(), 16) < self.target:
                     return self._block_for(n)
             return None
@@ -465,7 +477,7 @@ class GpuEngine:
         block = dict(self.candidate)
         block["nonce"] = nonce
         block["hash"] = hashlib.sha256(
-            self.prefix + str(nonce).encode("ascii") + self.suffix).hexdigest()
+            self.prefix + self._format_nonce(nonce) + self.suffix).hexdigest()
         return block
 
     def stop(self):
