@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 TRANSACTION_FEE = 1.0
 RETARGET_FACTOR = 4
 TX_MEMO_MAX = getattr(config, "TX_MEMO_MAX", 512)
+POW_V2_ACTIVATION = getattr(config, "POW_V2_ACTIVATION", 500)
+POW_V2_VERSION = 2
+POW_V2_NONCE_DIGITS = 20
+EMPTY_MERKLE_ROOT = b"\x00" * 32
 
 ADDRESS_VERSION_RSA = "0"
 ADDRESS_VERSION_ED25519 = "1"
@@ -160,6 +164,44 @@ class MiningInterrupted(Exception):
     pass
 
 
+def tx_hash(tx):
+    canonical = json.dumps(tx, sort_keys=True)
+    return hashlib.sha256(canonical.encode()).digest()
+
+
+def merkle_root(transactions):
+    if not transactions:
+        return EMPTY_MERKLE_ROOT
+    layer = [tx_hash(tx) for tx in transactions]
+    while len(layer) > 1:
+        if len(layer) % 2:
+            layer.append(layer[-1])
+        layer = [hashlib.sha256(layer[i] + layer[i + 1]).digest()
+                 for i in range(0, len(layer), 2)]
+    return layer[0]
+
+
+def pow_v2_header_parts(index, timestamp, transactions, previous_hash, miner):
+    prefix = (
+        bytes([POW_V2_VERSION])
+        + int(index).to_bytes(8, "big")
+        + int(timestamp).to_bytes(8, "big")
+    )
+    suffix = (
+        bytes.fromhex(previous_hash)
+        + merkle_root(transactions)
+        + hashlib.sha256((miner or "").encode()).digest()
+    )
+    return prefix, suffix
+
+
+def pow_v2_preimage(index, timestamp, transactions, previous_hash, miner, nonce):
+    prefix, suffix = pow_v2_header_parts(
+        index, timestamp, transactions, previous_hash, miner)
+    nonce_bytes = f"{nonce:0{POW_V2_NONCE_DIGITS}d}".encode("ascii")
+    return prefix + nonce_bytes + suffix
+
+
 def network_id():
     params = {
         "model": "target-int",
@@ -170,6 +212,8 @@ def network_id():
         "REWARD": config.REWARD,
         "TRANSACTION_FEE": TRANSACTION_FEE,
         "RETARGET_FACTOR": RETARGET_FACTOR,
+        "POW": "v2-header-merkle",
+        "POW_V2_ACTIVATION": POW_V2_ACTIVATION,
     }
     return hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()
 
@@ -185,9 +229,23 @@ class Block:
         self.nonce = nonce
         self.target = (1 << 256) // difficulty \
             if isinstance(difficulty, int) and difficulty > 0 else None
+        if self.index >= POW_V2_ACTIVATION:
+            self._pow_prefix, self._pow_suffix = pow_v2_header_parts(
+                self.index, self.timestamp, self.transactions,
+                self.previous_hash, self.miner)
+        else:
+            self._pow_prefix = self._pow_suffix = None
         self.hash = self.calculate_hash()
 
     def calculate_hash(self):
+        if self.index >= POW_V2_ACTIVATION:
+            if getattr(self, "_pow_prefix", None) is None:
+                self._pow_prefix, self._pow_suffix = pow_v2_header_parts(
+                    self.index, self.timestamp, self.transactions,
+                    self.previous_hash, self.miner)
+            nonce_bytes = f"{self.nonce:0{POW_V2_NONCE_DIGITS}d}".encode("ascii")
+            return hashlib.sha256(
+                self._pow_prefix + nonce_bytes + self._pow_suffix).hexdigest()
         block_string = json.dumps({
             "index": self.index,
             "timestamp": self.timestamp,
@@ -374,8 +432,7 @@ class Blockchain:
         }
 
     def tx_id(self, tx):
-        canonical = json.dumps(tx, sort_keys=True)
-        return hashlib.sha256(canonical.encode()).hexdigest()
+        return tx_hash(tx).hex()
 
     def get_balance(self, address):
         balances = self.rebuild_balances(self.chain)
