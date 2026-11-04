@@ -6,7 +6,7 @@ from pathlib import Path
 import requests
 
 import config
-from core import network_id
+from core import network_id, BECH32_ACTIVATION
 
 CHAIN_PAGE_LIMIT = getattr(config, "CHAIN_PAGE_LIMIT", 500)
 logger = logging.getLogger(__name__)
@@ -228,6 +228,13 @@ class PeerNetwork:
                             f"(network_id {remote_id[:12]}... != "
                             f"{network_id()[:12]}...)", backoff=False)
             return
+
+        remote_activation = info.get("bech32_activation")
+        if remote_activation is not None and remote_activation != BECH32_ACTIVATION:
+            logger.warning(
+                "peer %s uses bech32_activation=%s (local %s); "
+                "upgrade configs must agree",
+                onion, remote_activation, BECH32_ACTIVATION)
 
         if self.my_onion:
             self.on_peer(onion, "POST", "/peers", body={"peers": [self.my_onion]})

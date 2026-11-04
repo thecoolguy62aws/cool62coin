@@ -4,12 +4,15 @@ import json
 import logging
 import pickle
 import threading
+from functools import lru_cache
 from pathlib import Path
 import shutil
 
 from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.exceptions import InvalidSignature
+
+import bech32_codec
 
 try:
     import config
@@ -34,7 +37,13 @@ ADDRESS_CHECKSUM_LEN = 8
 RSA_MODULUS_HEX_LEN = 512
 RSA_PUBLIC_EXPONENT = 65537
 ED25519_PUBLIC_HEX_LEN = 64
+ED25519_PUBLIC_BYTES_LEN = 32
 _HEX_DIGITS = set("0123456789abcdef")
+
+ADDRESS_SCHEME_HEX = "hex"
+ADDRESS_SCHEME_BECH32 = "bech32"
+BECH32_HRP = getattr(config, "BECH32_HRP", "c62")
+BECH32_ACTIVATION = getattr(config, "BECH32_ACTIVATION", 1500)
 
 DEFAULT_KEY_FILE = Path(__file__).with_name("public_key.pem")
 CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
@@ -42,7 +51,7 @@ CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
 def _address_checksum(body):
     return hashlib.sha256(body.encode()).hexdigest()[:ADDRESS_CHECKSUM_LEN]
 
-def encode_address(public_key):
+def _encode_hex_address(public_key):
     if isinstance(public_key, rsa.RSAPublicKey):
         modulus_hex = format(public_key.public_numbers().n, "x")
         if len(modulus_hex) > RSA_MODULUS_HEX_LEN:
@@ -58,9 +67,24 @@ def encode_address(public_key):
         raise ValueError("unsupported public key type")
     return body + _address_checksum(body)
 
-def decode_address(address):
-    if not isinstance(address, str) or len(address) <= ADDRESS_CHECKSUM_LEN:
-        raise ValueError("address must be a non-empty string")
+def _encode_bech32_address(public_key):
+    if not isinstance(public_key, ed25519.Ed25519PublicKey):
+        raise ValueError("Bech32 addresses are only supported for Ed25519 keys")
+    raw = public_key.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    data = bech32_codec.convertbits(raw, 8, 5, True)
+    return bech32_codec.encode(BECH32_HRP, data, bech32_codec.BECH32M_CONST)
+
+def encode_address(public_key, scheme=ADDRESS_SCHEME_HEX):
+    if scheme == ADDRESS_SCHEME_HEX:
+        return _encode_hex_address(public_key)
+    if scheme == ADDRESS_SCHEME_BECH32:
+        return _encode_bech32_address(public_key)
+    raise ValueError(f"unknown address scheme {scheme!r}")
+
+def _decode_hex_address(address):
     if any(c not in _HEX_DIGITS for c in address):
         raise ValueError("address must be lowercase hex")
     body, checksum = address[:-ADDRESS_CHECKSUM_LEN], address[-ADDRESS_CHECKSUM_LEN:]
@@ -78,21 +102,77 @@ def decode_address(address):
         return ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(payload))
     raise ValueError(f"unknown address version {version!r}")
 
-def is_valid_address(address):
+def _decode_bech32_address(address):
+    hrp, data = bech32_codec.decode(address, bech32_codec.BECH32M_CONST)
+    if hrp != BECH32_HRP:
+        raise ValueError(f"address prefix must be {BECH32_HRP!r}")
+    payload = bech32_codec.convertbits(data, 5, 8, False)
+    if payload is None or len(payload) != ED25519_PUBLIC_BYTES_LEN:
+        raise ValueError("invalid Bech32 address length")
+    return ed25519.Ed25519PublicKey.from_public_bytes(bytes(payload))
+
+def _parse_address(address):
+    if not isinstance(address, str) or len(address) <= ADDRESS_CHECKSUM_LEN:
+        raise ValueError("address must be a non-empty string")
+    hex_like = all(c in _HEX_DIGITS for c in address)
     try:
-        decode_address(address)
-        return True
+        return _decode_hex_address(address), ADDRESS_SCHEME_HEX
+    except ValueError as hex_error:
+        try:
+            return _decode_bech32_address(address), ADDRESS_SCHEME_BECH32
+        except ValueError as bech32_error:
+            raise (hex_error if hex_like else bech32_error) from None
+
+def decode_address(address):
+    return _parse_address(address)[0]
+
+def address_scheme(address):
+    return _parse_address(address)[1]
+
+@lru_cache(maxsize=4096)
+def _canonical_address_cached(address):
+    public_key, scheme = _parse_address(address)
+    if scheme == ADDRESS_SCHEME_BECH32:
+        return _encode_hex_address(public_key)
+    return address
+
+def canonical_address(address):
+    if not isinstance(address, str):
+        raise ValueError("address must be a string")
+    return _canonical_address_cached(address)
+
+def _address_allowed(scheme, height):
+    return (scheme == ADDRESS_SCHEME_HEX
+            or height is None
+            or height >= BECH32_ACTIVATION)
+
+def is_valid_address(address, height=None):
+    try:
+        _, scheme = _parse_address(address)
     except (ValueError, TypeError):
         return False
+    return _address_allowed(scheme, height)
 
-def address_from_public_key(public_key):
-    return encode_address(public_key)
+def address_from_public_key(public_key, scheme=ADDRESS_SCHEME_HEX):
+    return encode_address(public_key, scheme)
 
-def load_key_address(path=None):
+def load_key_address(path=None, scheme=ADDRESS_SCHEME_HEX):
     key_file = Path(path) if path else DEFAULT_KEY_FILE
     with open(key_file, "rb") as f:
         public_key = serialization.load_pem_public_key(f.read())
-    return address_from_public_key(public_key)
+    return address_from_public_key(public_key, scheme)
+
+def display_key_address(path=None, scheme=None, height=None):
+    if scheme is None and height is not None:
+        scheme = (ADDRESS_SCHEME_BECH32 if height >= BECH32_ACTIVATION
+                  else ADDRESS_SCHEME_HEX)
+    scheme = scheme or getattr(config, "ADDRESS_DISPLAY", ADDRESS_SCHEME_BECH32)
+    try:
+        return load_key_address(path, scheme)
+    except ValueError:
+        if scheme == ADDRESS_SCHEME_BECH32:
+            return load_key_address(path, ADDRESS_SCHEME_HEX)
+        raise
 
 def load_private_key(path="private_key.pem", password=None):
     with open(path, "rb") as f:
@@ -381,7 +461,14 @@ class Blockchain:
                 nonce=spec["nonce"], timestamp=spec["timestamp"],
             )
         else:
-            genesis = Block(0, [], "0", miner=self.miner_address,
+            miner = self.miner_address
+            try:
+                _, miner_scheme = _parse_address(miner)
+            except (ValueError, TypeError):
+                miner_scheme = None
+            if miner_scheme == ADDRESS_SCHEME_BECH32 and not _address_allowed(miner_scheme, 0):
+                miner = canonical_address(miner)
+            genesis = Block(0, [], "0", miner=miner,
                             difficulty=self.difficulty)
             genesis.mine()
         self.chain.append(genesis)
@@ -432,17 +519,37 @@ class Blockchain:
         }
 
     def tx_id(self, tx):
-        return tx_hash(tx).hex()
+        canonical = dict(tx)
+        for field in ("sender", "receiver"):
+            try:
+                canonical[field] = canonical_address(canonical[field])
+            except (KeyError, ValueError, TypeError):
+                pass
+        return tx_hash(canonical).hex()
 
     def get_balance(self, address):
-        balances = self.rebuild_balances(self.chain)
+        try:
+            address = canonical_address(address)
+        except (ValueError, TypeError):
+            return 0
+        balances = self.rebuild_balances(self.chain) or {}
         return balances.get(address, 0)
 
     def rebuild_balances(self, chain, verify=False):
         balances = {}
-        for block in chain:
+        for index, block in enumerate(chain):
             if block.miner:
-                balances[block.miner] = balances.get(block.miner, 0) + self.reward
+                try:
+                    miner_key, miner_scheme = _parse_address(block.miner)
+                except (ValueError, TypeError):
+                    miner_key, miner_scheme = None, None
+                if miner_scheme == ADDRESS_SCHEME_BECH32:
+                    if not _address_allowed(miner_scheme, index):
+                        return None
+                    miner_address = _encode_hex_address(miner_key)
+                else:
+                    miner_address = block.miner
+                balances[miner_address] = balances.get(miner_address, 0) + self.reward
             for tx in block.transactions:
                 if verify:
                     try:
@@ -455,10 +562,20 @@ class Blockchain:
                     ok = verify_transaction(tx["sender"], tx["signature"], transaction_string)
                     if not ok:
                         return None
-                if tx["amount"] < 0 or balances.get(tx["sender"], 0) < tx["amount"] + TRANSACTION_FEE:
+                try:
+                    _, sender_scheme = _parse_address(tx["sender"])
+                    _, receiver_scheme = _parse_address(tx["receiver"])
+                except (ValueError, TypeError, KeyError):
                     return None
-                balances[tx["sender"]] = balances.get(tx["sender"], 0) - tx["amount"] - TRANSACTION_FEE
-                balances[tx["receiver"]] = balances.get(tx["receiver"], 0) + tx["amount"]
+                if not (_address_allowed(sender_scheme, index)
+                        and _address_allowed(receiver_scheme, index)):
+                    return None
+                sender = canonical_address(tx["sender"])
+                receiver = canonical_address(tx["receiver"])
+                if tx["amount"] < 0 or balances.get(sender, 0) < tx["amount"] + TRANSACTION_FEE:
+                    return None
+                balances[sender] = balances.get(sender, 0) - tx["amount"] - TRANSACTION_FEE
+                balances[receiver] = balances.get(receiver, 0) + tx["amount"]
         return balances
 
     def add_transaction(self, sender, receiver, amount, signature, nonce=0, memo=None):
@@ -471,6 +588,12 @@ class Blockchain:
         except ValueError:
             return False
 
+        next_height = len(self.chain)
+        if not is_valid_address(sender, next_height):
+            return False
+        if not is_valid_address(receiver, next_height):
+            return False
+
         transaction_string = tx_signing_payload(sender, receiver, amount, nonce, memo)
 
         try:
@@ -479,8 +602,10 @@ class Blockchain:
         except ValueError:
             return False
 
+        canonical_sender = canonical_address(sender)
         with self._lock:
-            if self.rebuild_balances(self.chain).get(sender, 0) - self.pending_debits.get(sender, 0) < amount + TRANSACTION_FEE:
+            balances = self.rebuild_balances(self.chain) or {}
+            if balances.get(canonical_sender, 0) - self.pending_debits.get(canonical_sender, 0) < amount + TRANSACTION_FEE:
                 return False
 
             tx = {
@@ -495,7 +620,7 @@ class Blockchain:
             if self.mempool_has(tx):
                 return False
             self.unconfirmed_transactions.append(tx)
-            self.pending_debits[sender] = self.pending_debits.get(sender, 0) + amount
+            self.pending_debits[canonical_sender] = self.pending_debits.get(canonical_sender, 0) + amount
             self.save()
         return True
 
@@ -503,11 +628,19 @@ class Blockchain:
         with self._lock:
             if not self.unconfirmed_transactions:
                 return None
+            index = len(self.chain)
+            miner = self.miner_address
+            try:
+                _, miner_scheme = _parse_address(miner)
+            except (ValueError, TypeError):
+                miner_scheme = None
+            if miner_scheme == ADDRESS_SCHEME_BECH32 and not _address_allowed(miner_scheme, index):
+                miner = canonical_address(miner)
             return {
-                "index": len(self.chain),
+                "index": index,
                 "transactions": list(self.unconfirmed_transactions),
                 "previous_hash": self.last_block.hash,
-                "miner": self.miner_address,
+                "miner": miner,
                 "difficulty": self.difficulty_at_next(),
             }
 
@@ -621,7 +754,8 @@ class Blockchain:
     def _recompute_pending(self):
         pending = {}
         for tx in self.unconfirmed_transactions:
-            pending[tx["sender"]] = pending.get(tx["sender"], 0) + tx["amount"] + TRANSACTION_FEE
+            sender = canonical_address(tx["sender"])
+            pending[sender] = pending.get(sender, 0) + tx["amount"] + TRANSACTION_FEE
         self.pending_debits = pending
 
     def is_chain_valid(self):

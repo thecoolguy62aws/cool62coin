@@ -27,6 +27,15 @@ Running a node is **not** required to use `send.py`, although it is strongly enc
 
 To use a remote node, change nothing. To use a local node, run `main.py` in a separate terminal window from `send.py`. **Note**: Restarting `send.py` is required after starting your local node. 
 
+## Addresses
+
+cool62coin supports two address encodings for the same Ed25519 key:
+
+- **Hex** (legacy): the original `1...` address format.
+- **Bech32m**: a `c62...` address using the BIP350 checksum.
+
+Both forms refer to the same account, so funds are shared: any address can receive or spend using either encoding. Wallets show Bech32m once the connected node reaches the activation height; before that they show the legacy hex form so addresses remain usable (`address bech32` forces the BIP-350 form). The network accepts Bech32 addresses starting at block height 1500; before that height only hex addresses are valid.
+
 ## Advanced Usage (mining)
 
 **A local node is required to mine; before doing anything below, make sure `main.py` is running in another window.**

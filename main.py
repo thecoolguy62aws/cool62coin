@@ -11,7 +11,8 @@ from waitress import serve
 from flask import Flask, request, jsonify, g
 
 import config
-from core import Blockchain, network_id, CHAIN_FILE, is_valid_address
+from core import (Blockchain, network_id, CHAIN_FILE, is_valid_address,
+                  BECH32_ACTIVATION)
 from p2p import PeerNetwork
 from torlaunch import TorDaemon
 
@@ -52,7 +53,7 @@ def index():
         onion=my_onion,
         endpoints={
             "POST /transaction": "{sender, receiver, amount, signature, nonce, memo?}",
-            "GET /balance": "?address=<hex public key>",
+            "GET /balance": "?address=<hex or c62 address>",
             "POST /block": "submit a fully-mined block",
             "GET /chain": "serialized chain (?from_index=&limit= pages, else full)",
             "POST /chain": "adopt a full serialized chain",
@@ -77,10 +78,16 @@ def transaction():
     if not all(isinstance(v, str) and v for v in (sender, receiver, signature)):
         return jsonify(success=False, error="sender, receiver and signature must be non-empty strings"), 400
 
-    if not is_valid_address(sender):
+    if not is_valid_address(sender, blockchain.height):
+        if is_valid_address(sender) and blockchain.height < BECH32_ACTIVATION:
+            return jsonify(success=False,
+                           error=f"Bech32 addresses activate at block {BECH32_ACTIVATION}"), 400
         return jsonify(success=False, error="sender is not a valid address"), 400
 
-    if not is_valid_address(receiver):
+    if not is_valid_address(receiver, blockchain.height):
+        if is_valid_address(receiver) and blockchain.height < BECH32_ACTIVATION:
+            return jsonify(success=False,
+                           error=f"Bech32 addresses activate at block {BECH32_ACTIVATION}"), 400
         return jsonify(success=False, error="receiver is not a valid address"), 400
 
     if isinstance(amount, bool) or not isinstance(amount, (int, float)):
@@ -208,6 +215,7 @@ def info():
         genesis=blockchain.chain[0].hash,
         tip=blockchain.last_block.hash,
         chain_page_max=CHAIN_PAGE_MAX,
+        bech32_activation=BECH32_ACTIVATION,
     )
 
 
