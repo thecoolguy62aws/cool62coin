@@ -9,7 +9,9 @@ from mnemonic import Mnemonic
 
 import requests
 
-from core import load_key_address, load_private_key, sign_transaction, is_valid_address
+from core import (load_key_address, load_private_key, sign_transaction,
+                  is_valid_address, display_key_address, canonical_address,
+                  BECH32_ACTIVATION, ADDRESS_SCHEME_HEX)
 
 DEFAULT_NODE = "http://127.0.0.1:8090"
 DEFAULT_KEY = "private_key.pem"
@@ -64,13 +66,36 @@ def _amount(value):
     return amount
 
 
+def _node_info(base):
+    try:
+        resp = requests.get(base.rstrip("/") + "/info", timeout=3)
+        if resp.ok:
+            return resp.json()
+    except requests.RequestException:
+        pass
+    return None
+
+
+def _node_height(args):
+    info = _node_info(args.node)
+    return info.get("height") if info else None
+
+
 def cmd_address(args):
-    print(load_key_address())
+    scheme = getattr(args, "scheme", None)
+    height = None if scheme else _node_height(args)
+    print(display_key_address(scheme=scheme, height=height))
 
 
 def cmd_balance(args):
-    address = args.address or load_key_address()
-    data = _node(args.node, f"/balance?address={address}")
+    scheme = getattr(args, "scheme", None)
+    height = None if scheme else _node_height(args)
+    address = args.address or display_key_address(scheme=scheme, height=height)
+    try:
+        query = canonical_address(address)
+    except (ValueError, TypeError):
+        query = address
+    data = _node(args.node, f"/balance?address={query}")
     print(f"{address}\nbalance: {int(data['balance']) if data['balance'].is_integer() else data['balance']}")
 
 
@@ -80,10 +105,17 @@ def cmd_send(args):
     memo = getattr(args, "memo", None) or None
     node_url = args.node
 
-    if not is_valid_address(receiver):
+    info = _node_info(args.node)
+    height = info.get("height") if info else None
+    activation = info.get("bech32_activation", BECH32_ACTIVATION) if info else BECH32_ACTIVATION
+
+    if not is_valid_address(receiver, height):
+        if is_valid_address(receiver) and height is not None and height < activation:
+            sys.exit(f"error: Bech32 addresses activate at block {activation} (current height {height})")
         sys.exit("error: receiver is not a valid address")
 
-    from_address = load_key_address()
+    from_address = load_key_address(scheme=ADDRESS_SCHEME_HEX)
+    from_display = display_key_address(height=height)
     private_key = load_private_key(args.key)
     nonce = int(time.time())
 
@@ -102,13 +134,13 @@ def cmd_send(args):
         tx["memo"] = memo
 
     from_path = args.node.replace("http://", "").replace("https://", "")
-    print(f"sending {int(amount) if amount.is_integer() else amount} to {receiver[:16]}... from {from_address[:16]} at {from_path}")
+    print(f"sending {int(amount) if amount.is_integer() else amount} to {receiver[:16]}... from {from_display[:16]} at {from_path}")
     _node(args.node, "/transaction", method="POST", body=tx)
     print(f"tx accepted (nonce {nonce}); it will enter the next mined block")
 
 
 HELP_TEXT = """commands:
-  address                      print this wallet's address
+  address [hex|bech32]         print this wallet's address
   balance [address]            show a balance (default: this wallet)
   send <receiver> <amount> [memo]  sign and send a transaction
   status                       node height / difficulty / own onion
@@ -240,16 +272,22 @@ def interactive(args):
             elif cmd in ("help", "h"):
                 print(HELP_TEXT)
             elif cmd == "address":
+                args.scheme = parts[0].lower() if parts else None
+                if args.scheme not in (None, "hex", "bech32"):
+                    print("usage: address [hex|bech32]")
+                    continue
                 cmd_address(args)
             elif cmd == "status":
                 cmd_status(args)
             elif cmd == "balance":
+                args.scheme = None
                 args.address = parts[0] if parts else None
                 cmd_balance(args)
             elif cmd == "send":
                 if len(parts) < 2:
                     print("usage: send <receiver> <amount> [memo]")
                     continue
+                args.scheme = None
                 args.receiver = parts[0]
                 args.amount = parts[1]
                 args.memo = " ".join(parts[2:]) if len(parts) > 2 else None
