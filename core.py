@@ -428,6 +428,7 @@ class Blockchain:
         self.miner_address = state.get("miner_address") or load_key_address()
         self.chain_file = CHAIN_FILE
         self._lock = threading.Lock()
+        self._prune_invalid_mempool()
 
     def save(self, path=None):
         chain_file = Path(path) if path else self.chain_file
@@ -620,12 +621,15 @@ class Blockchain:
             if self.mempool_has(tx):
                 return False
             self.unconfirmed_transactions.append(tx)
-            self.pending_debits[canonical_sender] = self.pending_debits.get(canonical_sender, 0) + amount
+            self.pending_debits[canonical_sender] = (
+                self.pending_debits.get(canonical_sender, 0)
+                + amount + TRANSACTION_FEE)
             self.save()
         return True
 
     def mine_block_candidate(self):
         with self._lock:
+            self._prune_invalid_mempool()
             if not self.unconfirmed_transactions:
                 return None
             index = len(self.chain)
@@ -750,6 +754,41 @@ class Blockchain:
             tx for tx in self.unconfirmed_transactions
             if self.tx_id(tx) not in confirmed
         ]
+
+    def _prune_invalid_mempool(self):
+        next_height = len(self.chain)
+        balances = dict(self.rebuild_balances(self.chain) or {})
+        pending = {}
+        kept = []
+        seen = set()
+        for tx in self.unconfirmed_transactions:
+            try:
+                amount = tx["amount"]
+                if (isinstance(amount, bool)
+                        or not isinstance(amount, (int, float))
+                        or amount < 0):
+                    continue
+                if not is_valid_address(tx["sender"], next_height):
+                    continue
+                if not is_valid_address(tx["receiver"], next_height):
+                    continue
+                sender = canonical_address(tx["sender"])
+                receiver = canonical_address(tx["receiver"])
+                txid = self.tx_id(tx)
+            except (KeyError, ValueError, TypeError):
+                continue
+            if txid in seen:
+                continue
+            required = amount + TRANSACTION_FEE
+            if balances.get(sender, 0) < required:
+                continue
+            balances[sender] = balances.get(sender, 0) - required
+            balances[receiver] = balances.get(receiver, 0) + amount
+            pending[sender] = pending.get(sender, 0) + required
+            seen.add(txid)
+            kept.append(tx)
+        self.unconfirmed_transactions = kept
+        self.pending_debits = pending
 
     def _recompute_pending(self):
         pending = {}

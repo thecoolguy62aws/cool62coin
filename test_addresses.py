@@ -44,7 +44,9 @@ def main():
         wrong_hrp = bech32_codec.encode("bc", data)
         assert not is_valid_address(wrong_hrp), "wrong HRP must be rejected"
 
-        mixed = bech_addr[:4] + bech_addr[4].upper() + bech_addr[5:]
+        mixed_index = next(i for i, c in enumerate(bech_addr) if c.isalpha())
+        mixed = (bech_addr[:mixed_index] + bech_addr[mixed_index].upper()
+                 + bech_addr[mixed_index + 1:])
         assert not is_valid_address(mixed), "mixed-case Bech32 must be rejected"
 
         core.BECH32_ACTIVATION = 0
@@ -92,6 +94,24 @@ def main():
             "sender encoding must not change the logical tx id"
         assert bc.tx_id(tx_hex) == bc.tx_id(tx_receiver_bech), \
             "receiver encoding must not change the logical tx id"
+
+        # ------- pending fees and mempool pruning -------
+        fee_bc = Blockchain(difficulty=DIFF, miner_address=miner_hex,
+                            chain_file=Path(tmpdir) / "fees.pkl")
+        sig1 = sign_transaction(miner_priv, miner_hex, target_bech, 50.0, 101)
+        sig2 = sign_transaction(miner_priv, miner_hex, target_bech, 49.0, 102)
+        assert fee_bc.add_transaction(miner_hex, target_bech, 50.0, sig1, 101) is True
+        assert fee_bc.add_transaction(miner_hex, target_bech, 49.0, sig2, 102) is False, \
+            "second tx must reserve the fee for the first tx too"
+        tx2 = {"sender": miner_hex, "receiver": target_bech, "amount": 49.0,
+               "nonce": 102, "signature": sig2}
+        fee_bc.unconfirmed_transactions.append(tx2)
+        fee_bc._prune_invalid_mempool()
+        assert len(fee_bc.unconfirmed_transactions) == 1, \
+            "overcommitted mempool transaction must be pruned"
+        assert fee_bc.pending_debits[canonical_address(miner_hex)] == 51.0
+        candidate = fee_bc.mine_block_candidate()
+        assert candidate is not None and len(candidate["transactions"]) == 1
 
         # ------- activation gates -------
         core.BECH32_ACTIVATION = 1500
