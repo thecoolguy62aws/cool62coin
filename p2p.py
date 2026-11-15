@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import requests
@@ -8,7 +9,9 @@ import requests
 import config
 from core import network_id, BECH32_ACTIVATION
 
-CHAIN_PAGE_LIMIT = getattr(config, "CHAIN_PAGE_LIMIT", 500)
+CHAIN_PAGE_LIMIT = getattr(config, "CHAIN_PAGE_LIMIT", 750)
+MAX_PARALLEL_PEERS = getattr(config, "MAX_PARALLEL_PEERS", 16)
+PEER_TIMEOUT = getattr(config, "PEER_TIMEOUT", 30)
 logger = logging.getLogger(__name__)
 
 
@@ -23,6 +26,7 @@ class PeerNetwork:
         self.peers = set()
         self.seen_txs = set()
         self._lock = threading.Lock()
+        self._local = threading.local()
         self.peer_state = {}
         self.load_peers()
 
@@ -117,10 +121,17 @@ class PeerNetwork:
         proxy = f"socks5h://127.0.0.1:{self.socks_port}"
         return {"http": proxy, "https": proxy}
 
-    def on_peer(self, onion, method, path, body=None, timeout=15):
+    def _session(self):
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            self._local.session = session
+        return session
+
+    def on_peer(self, onion, method, path, body=None, timeout=PEER_TIMEOUT):
         url = f"http://{self._normalize(onion)}{path}"
         try:
-            response = requests.request(
+            response = self._session().request(
                 method, url, json=body,
                 proxies=self.proxies(), timeout=timeout,
             )
@@ -128,6 +139,14 @@ class PeerNetwork:
             return response.json()
         except Exception:
             return None
+
+    def _map_peers(self, fn):
+        peers = list(self.peers)
+        if not peers:
+            return
+        workers = min(len(peers), MAX_PARALLEL_PEERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(fn, peers))
 
     def _chain_page(self, onion, from_index, limit):
         page = self.on_peer(
@@ -190,24 +209,30 @@ class PeerNetwork:
         return self._fetch_whole(onion)
 
     def broadcast_tx(self, tx):
-        for onion in list(self.peers):
-            self.on_peer(onion, "POST", "/transaction", body=tx)
+        self._map_peers(
+            lambda onion: self.on_peer(onion, "POST", "/transaction", body=tx))
 
     def broadcast_block(self, block_dict):
-        for onion in list(self.peers):
-            self.on_peer(onion, "POST", "/block", body=block_dict)
+        self._map_peers(
+            lambda onion: self.on_peer(onion, "POST", "/block", body=block_dict))
 
     def broadcast_chain(self, block_dicts):
-        for onion in list(self.peers):
-            self.on_peer(onion, "POST", "/chain", body={"blocks": block_dicts})
+        body = {"blocks": block_dicts}
+        self._map_peers(
+            lambda onion: self.on_peer(onion, "POST", "/chain", body=body))
 
     def on_local_tx(self, tx):
         self.seen_txs.add(self.blockchain.tx_id(tx))
         self.broadcast_tx(tx)
 
     def sync_once(self):
-        for onion in list(self.peers):
+        self._map_peers(self._safe_sync_peer)
+
+    def _safe_sync_peer(self, onion):
+        try:
             self.sync_peer(onion)
+        except Exception:
+            logger.exception("sync: peer %s... unexpected error", onion[:12])
 
     def sync_peer(self, onion):
         if time.time() < self._state(onion)["backoff_until"]:
