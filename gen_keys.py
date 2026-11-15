@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2026 thecoolguy62aws
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from pathlib import Path

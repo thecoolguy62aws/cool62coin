@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2026 thecoolguy62aws
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 import os
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: © 2026 thecoolguy62aws
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Standalone mining client.
 
 Polls a local node's GET /work endpoint for a block template, solves the

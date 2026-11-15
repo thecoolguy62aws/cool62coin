@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2026 thecoolguy62aws
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Minimal Bech32/Bech32m codec (BIP173/BIP350)."""
 
 CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
