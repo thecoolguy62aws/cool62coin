@@ -16,7 +16,7 @@ from flask import Flask, request, jsonify, g
 import config
 from core import (Blockchain, network_id, CHAIN_FILE, is_valid_address,
                   BECH32_ACTIVATION)
-from p2p import PeerNetwork
+from p2p import PeerNetwork, socks_available
 from torlaunch import TorDaemon
 
 logger = logging.getLogger(__name__)
@@ -286,6 +286,13 @@ def main():
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+
+    if not socks_available():
+        logger.error("PySocks is not installed, so peer traffic cannot go "
+                     "through the Tor SOCKS proxy. Install it with "
+                     "`pip install PySocks` (or `apt install python3-socks`) "
+                     "and restart the node.")
+        sys.exit(1)
 
     global my_onion, peer_net, blockchain
     chain_path = Path(args.chain) if args.chain else CHAIN_FILE

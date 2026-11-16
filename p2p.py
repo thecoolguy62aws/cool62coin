@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: © 2026 thecoolguy62aws
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
+import importlib.util
 import logging
 import threading
 import time
@@ -18,6 +19,11 @@ PEER_TIMEOUT = getattr(config, "PEER_TIMEOUT", 30)
 logger = logging.getLogger(__name__)
 
 
+def socks_available():
+    """True when requests can route through a SOCKS proxy (needs PySocks)."""
+    return importlib.util.find_spec("socks") is not None
+
+
 class PeerNetwork:
     def __init__(self, blockchain, peers_file, my_onion=None,
                  socks_port=config.SOCKS_PORT, sync_interval=config.SYNC_INTERVAL):
@@ -31,6 +37,7 @@ class PeerNetwork:
         self._lock = threading.Lock()
         self._local = threading.local()
         self.peer_state = {}
+        self._request_errors = {}
         self.load_peers()
 
     def load_peers(self):
@@ -131,6 +138,25 @@ class PeerNetwork:
             self._local.session = session
         return session
 
+    def _note_request_error(self, onion, exc):
+        reason = f"{type(exc).__name__}: {exc}"
+        if len(reason) > 240:
+            reason = reason[:237] + "..."
+        with self._lock:
+            previous = self._request_errors.get(onion)
+            self._request_errors[onion] = reason
+        if reason != previous:
+            logger.warning("peer %s... request failed: %s", onion[:12], reason)
+        return reason
+
+    def _clear_request_error(self, onion):
+        with self._lock:
+            self._request_errors.pop(onion, None)
+
+    def _last_request_error(self, onion):
+        with self._lock:
+            return self._request_errors.get(onion)
+
     def on_peer(self, onion, method, path, body=None, timeout=PEER_TIMEOUT):
         url = f"http://{self._normalize(onion)}{path}"
         try:
@@ -139,8 +165,11 @@ class PeerNetwork:
                 proxies=self.proxies(), timeout=timeout,
             )
             response.raise_for_status()
-            return response.json()
-        except Exception:
+            result = response.json()
+            self._clear_request_error(onion)
+            return result
+        except Exception as exc:
+            self._note_request_error(onion, exc)
             return None
 
     def _map_peers(self, fn):
@@ -242,7 +271,8 @@ class PeerNetwork:
             return
         info = self.on_peer(onion, "GET", "/info")
         if not info:
-            self._note_fail(onion, "no /info response")
+            reason = self._last_request_error(onion) or "no /info response"
+            self._note_fail(onion, reason)
             return
         self._note_ok(onion, info.get("height"))
 
