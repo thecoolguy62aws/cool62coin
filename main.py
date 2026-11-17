@@ -15,7 +15,11 @@ from flask import Flask, request, jsonify, g
 
 import config
 from core import (Blockchain, network_id, CHAIN_FILE, is_valid_address,
-                  BECH32_ACTIVATION)
+                  BECH32_ACTIVATION, ATOMIC_ACTIVATION, CONSENSUS_VERSION,
+                  COIN_ATOMS, COIN_DECIMALS, MAX_AMOUNT_ATOMS,
+                  TX_VERSION_ATOMS, TX_VERSION_LEGACY,
+                  amount_atoms_for_height, atoms_to_coins_float,
+                  transaction_fee_atoms)
 from p2p import PeerNetwork, socks_available
 from torlaunch import TorDaemon
 
@@ -55,7 +59,7 @@ def index():
         success=True,
         onion=my_onion,
         endpoints={
-            "POST /transaction": "{sender, receiver, amount, signature, nonce, memo?}",
+            "POST /transaction": "{sender, receiver, amount, signature, nonce, memo?, version?}",
             "GET /balance": "?address=<hex or c62 address>",
             "POST /block": "submit a fully-mined block",
             "GET /chain": "serialized chain (?from_index=&limit= pages, else full)",
@@ -77,24 +81,46 @@ def transaction():
     signature = data.get("signature")
     nonce = data.get("nonce", 0)
     memo = data.get("memo")
+    height = blockchain.height
+    expected_version = (TX_VERSION_ATOMS if height >= ATOMIC_ACTIVATION
+                        else TX_VERSION_LEGACY)
+    version = data.get("version")
+    if version is None:
+        version = expected_version
 
     if not all(isinstance(v, str) and v for v in (sender, receiver, signature)):
         return jsonify(success=False, error="sender, receiver and signature must be non-empty strings"), 400
 
-    if not is_valid_address(sender, blockchain.height):
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or version not in (TX_VERSION_LEGACY, TX_VERSION_ATOMS):
+        return jsonify(success=False, error="version must be 1 or 2"), 400
+    if version != expected_version:
+        if version == TX_VERSION_ATOMS:
+            return jsonify(success=False,
+                           error=f"atomic transactions (version 2) activate at block {ATOMIC_ACTIVATION}"), 400
+        return jsonify(success=False,
+                       error=f"legacy transactions are no longer accepted at block {ATOMIC_ACTIVATION}"), 400
+
+    next_height = blockchain.height
+    if not is_valid_address(sender, next_height):
         if is_valid_address(sender) and blockchain.height < BECH32_ACTIVATION:
             return jsonify(success=False,
                            error=f"Bech32 addresses activate at block {BECH32_ACTIVATION}"), 400
         return jsonify(success=False, error="sender is not a valid address"), 400
 
-    if not is_valid_address(receiver, blockchain.height):
+    if not is_valid_address(receiver, next_height):
         if is_valid_address(receiver) and blockchain.height < BECH32_ACTIVATION:
             return jsonify(success=False,
                            error=f"Bech32 addresses activate at block {BECH32_ACTIVATION}"), 400
         return jsonify(success=False, error="receiver is not a valid address"), 400
 
-    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-        return jsonify(success=False, error="amount must be a number"), 400
+    try:
+        amount_atoms_for_height(amount, version, next_height)
+    except ValueError as e:
+        if version == TX_VERSION_ATOMS:
+            return jsonify(success=False,
+                           error=f"amount must be integer atoms (0..{MAX_AMOUNT_ATOMS})"), 400
+        return jsonify(success=False, error=f"amount must be a number with at most {COIN_DECIMALS} decimal places"), 400
 
     if isinstance(nonce, bool) or not isinstance(nonce, int):
         return jsonify(success=False, error="nonce must be an integer"), 400
@@ -111,13 +137,16 @@ def transaction():
         "nonce": nonce,
         "signature": signature,
     }
+    if version == TX_VERSION_ATOMS:
+        tx["version"] = version
     if memo:
         tx["memo"] = memo
     already = blockchain.mempool_has(tx)
-    if not blockchain.add_transaction(sender, receiver, amount, signature, nonce, memo):
+    if not blockchain.add_transaction(sender, receiver, amount, signature, nonce,
+                                      memo, version=version):
         return jsonify(success=False, error="transaction rejected: bad signature, invalid address or insufficient funds"), 400
-    logger.info("accepted tx %s %s->%s amount=%s",
-                blockchain.tx_id(tx)[:8], sender[:8], receiver[:8], amount)
+    logger.info("accepted tx %s %s->%s amount=%s version=%d",
+                blockchain.tx_id(tx)[:8], sender[:8], receiver[:8], amount, version)
     if not already:
         threading.Thread(target=peer_net.on_local_tx, args=(tx,), daemon=True).start()
     return jsonify(success=True), 201
@@ -129,7 +158,11 @@ def balance():
     if not address:
         return jsonify(success=False, error="missing 'address' query parameter"), 400
 
-    return jsonify(success=True, address=address, balance=blockchain.get_balance(address))
+    atoms = blockchain.get_balance(address)
+    return jsonify(success=True, address=address,
+                   balance=atoms_to_coins_float(atoms),
+                   balance_atoms=atoms,
+                   decimals=COIN_DECIMALS)
 
 
 @app.post("/block")
@@ -208,12 +241,23 @@ def announce_peers():
 
 @app.get("/info")
 def info():
+    height = len(blockchain.chain)
     return jsonify(
         success=True,
         onion=my_onion,
-        height=len(blockchain.chain),
+        height=height,
         difficulty=blockchain.difficulty_at_next(),
-        reward=blockchain.reward,
+        reward=atoms_to_coins_float(blockchain.reward),
+        reward_atoms=blockchain.reward,
+        transaction_fee=atoms_to_coins_float(transaction_fee_atoms(height)),
+        transaction_fee_atoms=transaction_fee_atoms(height),
+        coin_decimals=COIN_DECIMALS,
+        coin_atoms=COIN_ATOMS,
+        amount_unit="atoms",
+        consensus_version=CONSENSUS_VERSION,
+        atomic_activation=ATOMIC_ACTIVATION,
+        tx_version=(TX_VERSION_ATOMS if height >= ATOMIC_ACTIVATION
+                    else TX_VERSION_LEGACY),
         network_id=network_id(),
         genesis=blockchain.chain[0].hash,
         tip=blockchain.last_block.hash,
@@ -254,7 +298,7 @@ def work():
                 "previous_hash": tip.hash,
                 "transactions": transactions,
                 "difficulty": difficulty,
-                "timestamp": int(time.time()),
+                "timestamp": blockchain.next_timestamp(),
             }
         template = _work_memo["template"]
     template_id = hashlib.sha256(

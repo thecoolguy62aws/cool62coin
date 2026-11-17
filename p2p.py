@@ -345,7 +345,10 @@ class PeerNetwork:
         pool = self.on_peer(onion, "GET", "/txpool")
         if pool:
             for tx in pool.get("transactions", []):
-                txid = self.blockchain.tx_id(tx)
+                try:
+                    txid = self.blockchain.tx_id(tx)
+                except (KeyError, TypeError, ValueError):
+                    continue
                 if txid in self.seen_txs or self.blockchain.mempool_has(tx):
                     continue
                 ok = self.blockchain.add_transaction(
@@ -355,6 +358,7 @@ class PeerNetwork:
                     tx.get("signature"),
                     tx.get("nonce", 0),
                     tx.get("memo"),
+                    version=tx.get("version"),
                 )
                 if ok:
                     self.seen_txs.add(txid)
