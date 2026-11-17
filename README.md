@@ -36,6 +36,41 @@ cool62coin supports two address encodings for the same Ed25519 key:
 
 Both forms refer to the same account, so funds are shared: any address can receive or spend using either encoding. Wallets show Bech32m once the connected node reaches the activation height; before that they show the legacy hex form so addresses remain usable (`address bech32` forces the BIP-350 form). The network accepts Bech32 addresses starting at block height 1500; before that height only hex addresses are valid.
 
+## Hard fork at block 8000
+
+Block **8000** activates the atomic-amount fork. Every node must upgrade before
+the network reaches that height. Nodes on the old release advertise a different
+`network_id`, so upgraded and old nodes refuse to sync with each other instead
+of silently splitting later.
+
+What changes at block 8000:
+
+- **Amounts are integer atoms.** One coin is `100,000,000` atoms, so amounts
+  have 8 decimal places. Balances reported by `/balance` include both
+  `balance` (coins, for compatibility) and `balance_atoms` (the exact value).
+- **Transactions are versioned.** Version 1 stored coin amounts and is still
+  accepted before block 8000. Version 2 stores an integer number of atoms,
+  includes `"version": 2` in the signed payload, and is required at and after
+  block 8000. Historical version 1 signatures are still verified using their
+  original coin amounts.
+- **The reward and fee are configured in atoms.**
+  `REWARD = 10_000_000_000` is 100 coins and
+  `TRANSACTION_FEE = 100_000_000` is 1 coin.
+- **Zero-amount transactions remain valid**, so on-chain mail continues to
+  work.
+- **Consensus hardening:** chain adoption is anchored to the genesis block,
+  duplicate transaction IDs are rejected, malformed blocks and transactions
+  are rejected without raising, block timestamps must beat the median of the
+  previous 11 blocks and stay within 2 hours of wall time, and miners must use
+  a valid address once the fork is active.
+
+Run `python test_hardfork.py` to exercise the activation boundary, duplicate
+transactions, alternate genesis chains, malformed input, timestamp rules, and
+replay of the existing chain.
+
+**Do not downgrade a node after it has saved the upgraded chain format.** Older
+releases cannot load it and will start over from genesis.
+
 ## Advanced Usage (mining)
 
 **A local node is required to mine; before doing anything below, make sure `main.py` is running in another window.**
