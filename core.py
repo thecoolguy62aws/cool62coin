@@ -5,8 +5,10 @@ import time
 import hashlib
 import json
 import logging
+import math
 import pickle
 import threading
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 import shutil
@@ -26,7 +28,22 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-TRANSACTION_FEE = 1.0
+COIN_DECIMALS = getattr(config, "COIN_DECIMALS", 8)
+COIN_ATOMS = 10 ** COIN_DECIMALS
+ATOMIC_ACTIVATION = getattr(config, "ATOMIC_ACTIVATION", 8000)
+MAX_AMOUNT_ATOMS = getattr(config, "MAX_AMOUNT_ATOMS", (1 << 63) - 1)
+MAX_FUTURE_DRIFT = getattr(config, "MAX_FUTURE_DRIFT", 2 * 60 * 60)
+MAX_BLOCK_INDEX = (1 << 63) - 1
+MAX_BLOCK_TIMESTAMP = (1 << 63) - 1
+MAX_BLOCK_NONCE = (1 << 63) - 1
+MAX_BLOCK_DIFFICULTY = 1 << 256
+MAX_BLOCK_TRANSACTIONS = getattr(config, "MAX_BLOCK_TRANSACTIONS", 10_000)
+MTP_WINDOW = 11
+CONSENSUS_VERSION = 2
+TX_VERSION_LEGACY = 1
+TX_VERSION_ATOMS = 2
+LEGACY_TRANSACTION_FEE_COINS = 1.0
+TRANSACTION_FEE = getattr(config, "TRANSACTION_FEE", 100_000_000)
 RETARGET_FACTOR = 4
 TX_MEMO_MAX = getattr(config, "TX_MEMO_MAX", 512)
 POW_V2_ACTIVATION = getattr(config, "POW_V2_ACTIVATION", 500)
@@ -50,6 +67,106 @@ BECH32_ACTIVATION = getattr(config, "BECH32_ACTIVATION", 1500)
 
 DEFAULT_KEY_FILE = Path(__file__).with_name("public_key.pem")
 CHAIN_FILE = Path(__file__).with_name("blockchain.pkl")
+
+
+def _decimal_amount(value):
+    if isinstance(value, bool):
+        raise ValueError("amount must be a number")
+    if isinstance(value, Decimal):
+        amount = value
+    elif isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            raise ValueError("amount must be finite")
+        amount = Decimal(str(value))
+    elif isinstance(value, str):
+        try:
+            amount = Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError("invalid amount") from exc
+    else:
+        raise ValueError("amount must be a number")
+    if not amount.is_finite() or amount < 0:
+        raise ValueError("amount must be a finite non-negative number")
+    return amount
+
+
+def coins_to_atoms(value):
+    """Convert a legacy coin amount to integer atoms, rejecting excess precision."""
+    amount = _decimal_amount(value)
+    atoms = amount * COIN_ATOMS
+    if atoms != atoms.to_integral_value():
+        raise ValueError(f"amount has more than {COIN_DECIMALS} decimal places")
+    result = int(atoms)
+    if result > MAX_AMOUNT_ATOMS:
+        raise ValueError("amount is too large")
+    return result
+
+
+def parse_amount_to_atoms(value):
+    """Parse a user-supplied decimal amount directly into integer atoms."""
+    return coins_to_atoms(value)
+
+
+def atoms_to_coins(atoms):
+    if isinstance(atoms, bool) or not isinstance(atoms, int):
+        raise ValueError("atom amount must be an integer")
+    return Decimal(atoms) / COIN_ATOMS
+
+
+def atoms_to_coins_float(atoms):
+    return atoms / COIN_ATOMS
+
+
+def format_atoms(atoms):
+    if isinstance(atoms, bool) or not isinstance(atoms, int):
+        raise ValueError("atom amount must be an integer")
+    sign = "-" if atoms < 0 else ""
+    whole, fraction = divmod(abs(atoms), COIN_ATOMS)
+    if not fraction:
+        return f"{sign}{whole}"
+    digits = str(fraction).rjust(COIN_DECIMALS, "0").rstrip("0")
+    return f"{sign}{whole}.{digits}"
+
+
+def transaction_fee_atoms(height):
+    if height is not None and height < ATOMIC_ACTIVATION:
+        return coins_to_atoms(LEGACY_TRANSACTION_FEE_COINS)
+    return TRANSACTION_FEE
+
+
+def tx_version(tx):
+    if not isinstance(tx, dict):
+        raise ValueError("transaction must be an object")
+    version = tx.get("version", TX_VERSION_LEGACY)
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ValueError("transaction version must be an integer")
+    if version not in (TX_VERSION_LEGACY, TX_VERSION_ATOMS):
+        raise ValueError("unsupported transaction version")
+    return version
+
+
+def amount_atoms_for_height(amount, version, height):
+    if version == TX_VERSION_ATOMS:
+        if height is not None and height < ATOMIC_ACTIVATION:
+            raise ValueError("atom transactions are not active yet")
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise ValueError("atom amounts must be integers")
+        if amount < 0 or amount > MAX_AMOUNT_ATOMS:
+            raise ValueError("amount is out of range")
+        return amount
+    if version == TX_VERSION_LEGACY:
+        if height is not None and height >= ATOMIC_ACTIVATION:
+            raise ValueError("legacy transactions are no longer accepted")
+        return coins_to_atoms(amount)
+    raise ValueError("unsupported transaction version")
+
+
+def tx_amount_atoms(tx, height):
+    version = tx_version(tx)
+    if "amount" not in tx:
+        raise ValueError("transaction is missing amount")
+    return amount_atoms_for_height(tx["amount"], version, height)
+
 
 def _address_checksum(body):
     return hashlib.sha256(body.encode()).hexdigest()[:ADDRESS_CHECKSUM_LEN]
@@ -190,13 +307,18 @@ def _validated_memo(memo):
         raise ValueError(f"memo exceeds {TX_MEMO_MAX} bytes")
     return memo
 
-def tx_signing_payload(sender, receiver, amount, nonce, memo=None):
+def tx_signing_payload(sender, receiver, amount, nonce, memo=None,
+                       version=TX_VERSION_LEGACY):
+    if version not in (TX_VERSION_LEGACY, TX_VERSION_ATOMS):
+        raise ValueError("unsupported transaction version")
     payload = {
         "sender": sender,
         "receiver": receiver,
         "amount": amount,
         "nonce": nonce,
     }
+    if version == TX_VERSION_ATOMS:
+        payload["version"] = TX_VERSION_ATOMS
     if memo:
         payload["memo"] = memo
     return json.dumps(payload, sort_keys=True).encode()
@@ -225,9 +347,18 @@ def verify_transaction(sender, signature, transaction_string):
     except (InvalidSignature, ValueError):
         return False
 
-def sign_transaction(private_key, sender, receiver, amount, nonce=0, memo=None):
+def sign_transaction(private_key, sender, receiver, amount, nonce=0, memo=None,
+                     version=TX_VERSION_LEGACY):
     memo = _validated_memo(memo)
-    transaction_string = tx_signing_payload(sender, receiver, amount, nonce, memo)
+    if version == TX_VERSION_ATOMS:
+        if isinstance(amount, bool) or not isinstance(amount, int):
+            raise ValueError("atom amounts must be integers")
+        if amount < 0 or amount > MAX_AMOUNT_ATOMS:
+            raise ValueError("amount is out of range")
+    else:
+        coins_to_atoms(amount)
+    transaction_string = tx_signing_payload(
+        sender, receiver, amount, nonce, memo, version=version)
 
     if isinstance(private_key, rsa.RSAPrivateKey):
         signature = private_key.sign(
@@ -288,12 +419,20 @@ def pow_v2_preimage(index, timestamp, transactions, previous_hash, miner, nonce)
 def network_id():
     params = {
         "model": "target-int",
+        "CONSENSUS_VERSION": CONSENSUS_VERSION,
         "RETARGET_INTERVAL": config.RETARGET_INTERVAL,
         "TARGET_BLOCK_TIME": config.TARGET_BLOCK_TIME,
         "MIN_DIFFICULTY": config.MIN_DIFFICULTY,
         "MAX_DIFFICULTY": config.MAX_DIFFICULTY,
         "REWARD": config.REWARD,
         "TRANSACTION_FEE": TRANSACTION_FEE,
+        "COIN_DECIMALS": COIN_DECIMALS,
+        "ATOMIC_ACTIVATION": ATOMIC_ACTIVATION,
+        "BECH32_ACTIVATION": BECH32_ACTIVATION,
+        "TX_MEMO_MAX": TX_MEMO_MAX,
+        "MAX_FUTURE_DRIFT": MAX_FUTURE_DRIFT,
+        "MTP_WINDOW": MTP_WINDOW,
+        "GENESIS": config.GENESIS,
         "RETARGET_FACTOR": RETARGET_FACTOR,
         "POW": "v2-header-merkle",
         "POW_V2_ACTIVATION": POW_V2_ACTIVATION,
@@ -304,7 +443,13 @@ class Block:
     def __init__(self, index, transactions, previous_hash, miner=None,
                  difficulty=0, nonce=0, timestamp=None):
         self.index = index
-        self.timestamp = timestamp if timestamp is not None else time.time()
+        if timestamp is None:
+            timestamp = int(time.time())
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            raise ValueError("timestamp must be an integer")
+        if isinstance(timestamp, float) and not math.isfinite(timestamp):
+            raise ValueError("timestamp must be finite")
+        self.timestamp = int(timestamp)
         self.transactions = transactions
         self.previous_hash = previous_hash
         self.miner = miner
@@ -367,14 +512,56 @@ class Block:
 
     @classmethod
     def from_dict(cls, data):
+        if not isinstance(data, dict):
+            raise ValueError("block must be an object")
+
+        index = data.get("index")
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0 \
+                or index > MAX_BLOCK_INDEX:
+            raise ValueError("invalid block index")
+
+        timestamp = data.get("timestamp")
+        if isinstance(timestamp, bool) or not isinstance(timestamp, int) \
+                or timestamp < 0 or timestamp > MAX_BLOCK_TIMESTAMP:
+            raise ValueError("invalid block timestamp")
+
+        transactions = data.get("transactions")
+        if not isinstance(transactions, list) \
+                or len(transactions) > MAX_BLOCK_TRANSACTIONS:
+            raise ValueError("invalid block transactions")
+
+        previous_hash = data.get("previous_hash")
+        if not isinstance(previous_hash, str) or not previous_hash:
+            raise ValueError("invalid previous hash")
+        if index == 0:
+            if previous_hash != "0":
+                raise ValueError("invalid genesis previous hash")
+        elif len(previous_hash) != 64 or \
+                any(c not in _HEX_DIGITS for c in previous_hash):
+            raise ValueError("invalid previous hash")
+
+        miner = data.get("miner")
+        if not isinstance(miner, str) or not miner:
+            raise ValueError("invalid block miner")
+
+        difficulty = data.get("difficulty")
+        if isinstance(difficulty, bool) or not isinstance(difficulty, int) \
+                or difficulty <= 0 or difficulty > MAX_BLOCK_DIFFICULTY:
+            raise ValueError("invalid block difficulty")
+
+        nonce = data.get("nonce")
+        if isinstance(nonce, bool) or not isinstance(nonce, int) or nonce < 0 \
+                or nonce > MAX_BLOCK_NONCE:
+            raise ValueError("invalid block nonce")
+
         return cls(
-            index=data["index"],
-            transactions=data["transactions"],
-            previous_hash=data["previous_hash"],
-            miner=data.get("miner"),
-            difficulty=data.get("difficulty", 0),
-            nonce=data["nonce"],
-            timestamp=data.get("timestamp"),
+            index=index,
+            transactions=transactions,
+            previous_hash=previous_hash,
+            miner=miner,
+            difficulty=difficulty,
+            nonce=nonce,
+            timestamp=timestamp,
         )
 
 def solve_block(candidate, yield_every=1024, nonce_start=0, stride=1,
@@ -392,7 +579,7 @@ def solve_block(candidate, yield_every=1024, nonce_start=0, stride=1,
     return block.to_dict()
 
 class Blockchain:
-    _schema_version = 5
+    _schema_version = 6
 
     def __init__(self, difficulty=config.DIFFICULTY, reward=config.REWARD,
                  miner_address=None, chain_file=CHAIN_FILE):
@@ -400,7 +587,9 @@ class Blockchain:
         self.unconfirmed_transactions = []
         self.pending_debits = {}
         self.difficulty = difficulty
-        self.reward = reward
+        if isinstance(reward, bool):
+            raise ValueError("reward must be a number")
+        self.reward = reward if isinstance(reward, int) else coins_to_atoms(reward)
         self.miner_address = miner_address or load_key_address()
         self.chain_file = Path(chain_file)
         self._lock = threading.Lock()
@@ -421,13 +610,17 @@ class Blockchain:
         return state
 
     def __setstate__(self, state):
-        if state.get("_schema_version") != self._schema_version:
+        schema = state.get("_schema_version")
+        if schema not in (5, 6):
             raise ValueError("incompatible persisted chain")
         self.chain = state["chain"]
         self.unconfirmed_transactions = state["unconfirmed_transactions"]
-        self.pending_debits = state["pending_debits"]
+        self.pending_debits = {}
         self.difficulty = state["difficulty"]
-        self.reward = state["reward"]
+        reward = state["reward"]
+        if schema == 5:
+            reward = coins_to_atoms(reward)
+        self.reward = reward
         self.miner_address = state.get("miner_address") or load_key_address()
         self.chain_file = CHAIN_FILE
         self._lock = threading.Lock()
@@ -497,6 +690,14 @@ class Blockchain:
     def last_block(self):
         return self.chain[-1]
 
+    def next_timestamp(self):
+        now = int(time.time())
+        if len(self.chain) < ATOMIC_ACTIVATION or not self.chain:
+            return now
+        prior = self.chain[-MTP_WINDOW:]
+        median = sorted(block.timestamp for block in prior)[len(prior) // 2]
+        return max(now, median + 1)
+
     @property
     def height(self):
         return len(self.chain)
@@ -523,13 +724,16 @@ class Blockchain:
         }
 
     def tx_id(self, tx):
-        canonical = dict(tx)
-        for field in ("sender", "receiver"):
-            try:
-                canonical[field] = canonical_address(canonical[field])
-            except (KeyError, ValueError, TypeError):
-                pass
-        return tx_hash(canonical).hex()
+        version = tx_version(tx)
+        try:
+            sender = canonical_address(tx["sender"])
+            receiver = canonical_address(tx["receiver"])
+            payload = tx_signing_payload(
+                sender, receiver, tx["amount"], tx["nonce"], tx.get("memo"),
+                version=version)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid transaction") from exc
+        return hashlib.sha256(payload).hexdigest()
 
     def get_balance(self, address):
         try:
@@ -539,13 +743,64 @@ class Blockchain:
         balances = self.rebuild_balances(self.chain) or {}
         return balances.get(address, 0)
 
+    def _validated_transaction(self, tx, height, verify):
+        if not isinstance(tx, dict):
+            raise ValueError("invalid transaction")
+        version = tx_version(tx)
+        expected = (TX_VERSION_ATOMS if height >= ATOMIC_ACTIVATION
+                    else TX_VERSION_LEGACY)
+        if version != expected:
+            raise ValueError("wrong transaction version for height")
+
+        amount = tx.get("amount")
+        amount_atoms = amount_atoms_for_height(amount, version, height)
+
+        nonce = tx.get("nonce")
+        if isinstance(nonce, bool) or not isinstance(nonce, int):
+            raise ValueError("invalid nonce")
+
+        sender = tx.get("sender")
+        receiver = tx.get("receiver")
+        signature = tx.get("signature")
+        if not isinstance(sender, str) or not sender:
+            raise ValueError("invalid sender")
+        if not isinstance(receiver, str) or not receiver:
+            raise ValueError("invalid receiver")
+        if not isinstance(signature, str) or not signature:
+            raise ValueError("invalid signature")
+        memo = _validated_memo(tx.get("memo"))
+
+        if verify:
+            transaction_string = tx_signing_payload(
+                sender, receiver, amount, nonce, memo, version=version)
+            if not verify_transaction(sender, signature, transaction_string):
+                raise ValueError("invalid signature")
+
+        _, sender_scheme = _parse_address(sender)
+        _, receiver_scheme = _parse_address(receiver)
+        if not (_address_allowed(sender_scheme, height)
+                and _address_allowed(receiver_scheme, height)):
+            raise ValueError("address not active at this height")
+        return (canonical_address(sender), canonical_address(receiver),
+                amount_atoms)
+
     def rebuild_balances(self, chain, verify=False):
-        balances = {}
-        for index, block in enumerate(chain):
-            if block.miner:
+        try:
+            balances = {}
+            seen_txids = set()
+            for index, block in enumerate(chain):
+                if not isinstance(block, Block):
+                    return None
+                if not isinstance(block.miner, str) or not block.miner:
+                    return None
+                if not isinstance(block.transactions, list):
+                    return None
+
                 try:
                     miner_key, miner_scheme = _parse_address(block.miner)
                 except (ValueError, TypeError):
+                    if index >= ATOMIC_ACTIVATION:
+                        return None
                     miner_key, miner_scheme = None, None
                 if miner_scheme == ADDRESS_SCHEME_BECH32:
                     if not _address_allowed(miner_scheme, index):
@@ -554,51 +809,55 @@ class Blockchain:
                 else:
                     miner_address = block.miner
                 balances[miner_address] = balances.get(miner_address, 0) + self.reward
-            for tx in block.transactions:
-                if verify:
-                    try:
-                        memo = _validated_memo(tx.get("memo"))
-                    except ValueError:
-                        return None
-                    transaction_string = tx_signing_payload(
-                        tx["sender"], tx["receiver"], tx["amount"], tx["nonce"], memo
-                    )
-                    ok = verify_transaction(tx["sender"], tx["signature"], transaction_string)
-                    if not ok:
-                        return None
-                try:
-                    _, sender_scheme = _parse_address(tx["sender"])
-                    _, receiver_scheme = _parse_address(tx["receiver"])
-                except (ValueError, TypeError, KeyError):
-                    return None
-                if not (_address_allowed(sender_scheme, index)
-                        and _address_allowed(receiver_scheme, index)):
-                    return None
-                sender = canonical_address(tx["sender"])
-                receiver = canonical_address(tx["receiver"])
-                if tx["amount"] < 0 or balances.get(sender, 0) < tx["amount"] + TRANSACTION_FEE:
-                    return None
-                balances[sender] = balances.get(sender, 0) - tx["amount"] - TRANSACTION_FEE
-                balances[receiver] = balances.get(receiver, 0) + tx["amount"]
-        return balances
 
-    def add_transaction(self, sender, receiver, amount, signature, nonce=0, memo=None):
-        if isinstance(amount, bool) or not isinstance(amount, (int, float)) or amount < 0:
+                for tx in block.transactions:
+                    try:
+                        txid = self.tx_id(tx)
+                        if txid in seen_txids:
+                            return None
+                        seen_txids.add(txid)
+                        sender, receiver, amount_atoms = \
+                            self._validated_transaction(tx, index, verify)
+                    except (KeyError, TypeError, ValueError):
+                        return None
+
+                    fee = transaction_fee_atoms(index)
+                    required = amount_atoms + fee
+                    if balances.get(sender, 0) < required:
+                        return None
+                    balances[sender] = balances.get(sender, 0) - required
+                    balances[receiver] = balances.get(receiver, 0) + amount_atoms
+            return balances
+        except (KeyError, TypeError, ValueError, OverflowError):
+            logger.warning("invalid balances rejected", exc_info=True)
+            return None
+
+    def add_transaction(self, sender, receiver, amount, signature, nonce=0,
+                        memo=None, version=None):
+        next_height = len(self.chain)
+        expected_version = (TX_VERSION_ATOMS if next_height >= ATOMIC_ACTIVATION
+                            else TX_VERSION_LEGACY)
+        if version is None:
+            version = expected_version
+        if isinstance(version, bool) or not isinstance(version, int):
+            return False
+        if version != expected_version:
             return False
         if isinstance(nonce, bool) or not isinstance(nonce, int):
             return False
         try:
+            amount_atoms = amount_atoms_for_height(amount, version, next_height)
             memo = _validated_memo(memo)
         except ValueError:
             return False
 
-        next_height = len(self.chain)
         if not is_valid_address(sender, next_height):
             return False
         if not is_valid_address(receiver, next_height):
             return False
 
-        transaction_string = tx_signing_payload(sender, receiver, amount, nonce, memo)
+        transaction_string = tx_signing_payload(
+            sender, receiver, amount, nonce, memo, version=version)
 
         try:
             if not verify_transaction(sender, signature, transaction_string):
@@ -607,9 +866,12 @@ class Blockchain:
             return False
 
         canonical_sender = canonical_address(sender)
+        fee = transaction_fee_atoms(next_height)
         with self._lock:
             balances = self.rebuild_balances(self.chain) or {}
-            if balances.get(canonical_sender, 0) - self.pending_debits.get(canonical_sender, 0) < amount + TRANSACTION_FEE:
+            available = (balances.get(canonical_sender, 0)
+                         - self.pending_debits.get(canonical_sender, 0))
+            if available < amount_atoms + fee:
                 return False
 
             tx = {
@@ -619,6 +881,8 @@ class Blockchain:
                 "nonce": nonce,
                 "signature": signature
             }
+            if version == TX_VERSION_ATOMS:
+                tx["version"] = version
             if memo:
                 tx["memo"] = memo
             if self.mempool_has(tx):
@@ -626,7 +890,7 @@ class Blockchain:
             self.unconfirmed_transactions.append(tx)
             self.pending_debits[canonical_sender] = (
                 self.pending_debits.get(canonical_sender, 0)
-                + amount + TRANSACTION_FEE)
+                + amount_atoms + fee)
             self.save()
         return True
 
@@ -649,12 +913,13 @@ class Blockchain:
                 "previous_hash": self.last_block.hash,
                 "miner": miner,
                 "difficulty": self.difficulty_at_next(),
+                "timestamp": self.next_timestamp(),
             }
 
     def commit_mined(self, block_dict):
         try:
             block = Block.from_dict(block_dict)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return False
         with self._lock:
             if block.index != len(self.chain):
@@ -665,7 +930,7 @@ class Blockchain:
                 return False
             self.chain.append(block)
             self._drop_confirmed()
-            self._recompute_pending()
+            self._prune_invalid_mempool()
             self.save()
         return True
 
@@ -676,33 +941,63 @@ class Blockchain:
         return self.commit_mined(solve_block(candidate, yield_every=yield_every))
 
     def validate_chain(self, chain):
-        if not chain:
+        try:
+            if not chain:
+                return False
+
+            for i, block in enumerate(chain):
+                if not isinstance(block, Block):
+                    return False
+                if block.index != i:
+                    return False
+                if not isinstance(block.miner, str) or not block.miner:
+                    return False
+                if not isinstance(block.transactions, list) \
+                        or len(block.transactions) > MAX_BLOCK_TRANSACTIONS:
+                    return False
+                if not isinstance(block.timestamp, int) \
+                        or block.timestamp < 0 \
+                        or block.timestamp > MAX_BLOCK_TIMESTAMP:
+                    return False
+                if isinstance(block.nonce, bool) or not isinstance(block.nonce, int) \
+                        or block.nonce < 0 or block.nonce > MAX_BLOCK_NONCE:
+                    return False
+                if isinstance(block.difficulty, bool) \
+                        or not isinstance(block.difficulty, int) \
+                        or block.difficulty <= 0 \
+                        or block.difficulty > MAX_BLOCK_DIFFICULTY:
+                    return False
+                if block.hash != block.calculate_hash():
+                    return False
+                if not block.is_mined():
+                    return False
+                if i == 0:
+                    if block.previous_hash != "0":
+                        return False
+                else:
+                    if block.previous_hash != chain[i - 1].hash:
+                        return False
+                    if block.difficulty != self.difficulty_at_next(chain[:i]):
+                        return False
+
+                if i >= ATOMIC_ACTIVATION:
+                    if block.timestamp > int(time.time()) + MAX_FUTURE_DRIFT:
+                        return False
+                    prior = chain[max(0, i - MTP_WINDOW):i]
+                    if prior:
+                        median = sorted(b.timestamp for b in prior)[len(prior) // 2]
+                        if block.timestamp <= median:
+                            return False
+
+            return self.rebuild_balances(chain, verify=True) is not None
+        except (KeyError, TypeError, ValueError, OverflowError):
+            logger.warning("invalid chain rejected", exc_info=True)
             return False
-
-        for i, block in enumerate(chain):
-            if block.index != i:
-                return False
-            if not block.miner:
-                return False
-            if block.hash != block.calculate_hash():
-                return False
-            if not block.is_mined():
-                return False
-            if i == 0:
-                if block.previous_hash != "0":
-                    return False
-            else:
-                if block.previous_hash != chain[i - 1].hash:
-                    return False
-                if block.difficulty != self.difficulty_at_next(chain[:i]):
-                    return False
-
-        return self.rebuild_balances(chain, verify=True) is not None
 
     def add_block(self, block_dict):
         try:
             block = Block.from_dict(block_dict)
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return False
 
         with self._lock:
@@ -714,17 +1009,21 @@ class Blockchain:
                 return False
             self.chain.append(block)
             self._drop_confirmed()
-            self._recompute_pending()
+            self._prune_invalid_mempool()
             self.save()
         return True
 
     def adopt_chain(self, block_dicts):
         try:
             blocks = [Block.from_dict(b) for b in block_dicts]
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return False
 
         with self._lock:
+            if not blocks or not self.chain:
+                return False
+            if blocks[0].hash != self.chain[0].hash:
+                return False
             if len(blocks) < len(self.chain):
                 return False
             if len(blocks) == len(self.chain):
@@ -736,57 +1035,79 @@ class Blockchain:
                 return False
             self.chain = blocks
             self._drop_confirmed()
-            self._recompute_pending()
+            self._prune_invalid_mempool()
             self.save()
         return True
 
     def mempool_has(self, tx):
-        txid = self.tx_id(tx)
+        try:
+            txid = self.tx_id(tx)
+        except ValueError:
+            return False
         for confirmed in self.chain:
             for confirmed_tx in confirmed.transactions:
-                if self.tx_id(confirmed_tx) == txid:
+                try:
+                    if self.tx_id(confirmed_tx) == txid:
+                        return True
+                except ValueError:
+                    continue
+        for pending in self.unconfirmed_transactions:
+            try:
+                if self.tx_id(pending) == txid:
                     return True
-        return any(self.tx_id(pending) == txid for pending in self.unconfirmed_transactions)
+            except ValueError:
+                continue
+        return False
 
     def _drop_confirmed(self):
         confirmed = set()
         for block in self.chain:
             for tx in block.transactions:
-                confirmed.add(self.tx_id(tx))
-        self.unconfirmed_transactions = [
-            tx for tx in self.unconfirmed_transactions
-            if self.tx_id(tx) not in confirmed
-        ]
+                try:
+                    confirmed.add(self.tx_id(tx))
+                except ValueError:
+                    continue
+        kept = []
+        for tx in self.unconfirmed_transactions:
+            try:
+                if self.tx_id(tx) not in confirmed:
+                    kept.append(tx)
+            except ValueError:
+                continue
+        self.unconfirmed_transactions = kept
 
     def _prune_invalid_mempool(self):
         next_height = len(self.chain)
+        expected_version = (TX_VERSION_ATOMS if next_height >= ATOMIC_ACTIVATION
+                            else TX_VERSION_LEGACY)
+        fee = transaction_fee_atoms(next_height)
         balances = dict(self.rebuild_balances(self.chain) or {})
         pending = {}
         kept = []
         seen = set()
         for tx in self.unconfirmed_transactions:
             try:
-                amount = tx["amount"]
-                if (isinstance(amount, bool)
-                        or not isinstance(amount, (int, float))
-                        or amount < 0):
+                if tx_version(tx) != expected_version:
                     continue
-                if not is_valid_address(tx["sender"], next_height):
+                amount_atoms = tx_amount_atoms(tx, next_height)
+                sender = tx["sender"]
+                receiver = tx["receiver"]
+                if not is_valid_address(sender, next_height):
                     continue
-                if not is_valid_address(tx["receiver"], next_height):
+                if not is_valid_address(receiver, next_height):
                     continue
-                sender = canonical_address(tx["sender"])
-                receiver = canonical_address(tx["receiver"])
+                sender = canonical_address(sender)
+                receiver = canonical_address(receiver)
                 txid = self.tx_id(tx)
             except (KeyError, ValueError, TypeError):
                 continue
             if txid in seen:
                 continue
-            required = amount + TRANSACTION_FEE
+            required = amount_atoms + fee
             if balances.get(sender, 0) < required:
                 continue
             balances[sender] = balances.get(sender, 0) - required
-            balances[receiver] = balances.get(receiver, 0) + amount
+            balances[receiver] = balances.get(receiver, 0) + amount_atoms
             pending[sender] = pending.get(sender, 0) + required
             seen.add(txid)
             kept.append(tx)
@@ -794,10 +1115,16 @@ class Blockchain:
         self.pending_debits = pending
 
     def _recompute_pending(self):
+        next_height = len(self.chain)
+        fee = transaction_fee_atoms(next_height)
         pending = {}
         for tx in self.unconfirmed_transactions:
-            sender = canonical_address(tx["sender"])
-            pending[sender] = pending.get(sender, 0) + tx["amount"] + TRANSACTION_FEE
+            try:
+                sender = canonical_address(tx["sender"])
+                required = tx_amount_atoms(tx, next_height) + fee
+            except (KeyError, ValueError, TypeError):
+                continue
+            pending[sender] = pending.get(sender, 0) + required
         self.pending_debits = pending
 
     def is_chain_valid(self):

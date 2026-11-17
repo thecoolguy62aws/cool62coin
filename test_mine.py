@@ -7,11 +7,11 @@ import threading
 import time
 from pathlib import Path
 
-from cryptography.hazmat.primitives.asymmetric import ed25519
+from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
 
 from core import (Block, Blockchain, MiningInterrupted, solve_block,
                   load_private_key, load_key_address, sign_transaction,
-                  verify_transaction, tx_signing_payload,
+                  verify_transaction, tx_signing_payload, coins_to_atoms,
                   address_from_public_key, decode_address, is_valid_address)
 
 DIFF = 3
@@ -51,8 +51,8 @@ def main():
 
         assert bc.commit_mined(solved) is True
         assert bc.height == 2
-        assert bc.get_balance(miner) == 189.0
-        assert bc.get_balance(target) == 10.0
+        assert bc.get_balance(miner) == coins_to_atoms(189.0)
+        assert bc.get_balance(target) == coins_to_atoms(10.0)
 
         overspend = sign_transaction(priv, miner, target, 189.0, 3)
         assert bc.add_transaction(miner, target, 189.0, overspend, 3) is False, \
@@ -158,7 +158,8 @@ def main():
         assert bc.difficulty_at_next(tight) == min(big * 4, cfg.MAX_DIFFICULTY)
 
         # ------- address encoding checks -------
-        rsa_addr = address_from_public_key(priv.public_key())
+        rsa_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        rsa_addr = address_from_public_key(rsa_priv.public_key())
         assert len(rsa_addr) == 1 + 512 + 8 and rsa_addr[0] == "0", rsa_addr[:8]
         assert is_valid_address(rsa_addr)
         assert address_from_public_key(decode_address(rsa_addr)) == rsa_addr, \

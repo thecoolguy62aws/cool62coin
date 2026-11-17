@@ -10,8 +10,9 @@ from cryptography.hazmat.primitives.asymmetric import ed25519
 import bech32_codec
 import core
 from core import (ADDRESS_SCHEME_BECH32, ADDRESS_SCHEME_HEX, Block,
-                  Blockchain, canonical_address, decode_address,
-                  encode_address, is_valid_address, sign_transaction)
+                  Blockchain, canonical_address, coins_to_atoms,
+                  decode_address, encode_address, is_valid_address,
+                  sign_transaction)
 
 DIFF = 3
 VECTOR = "c621qqqsyqcyq5rqwzqfpg9scrgwpugpzysnzs23v9ccrydpk8qarc0sppecz3"
@@ -79,15 +80,15 @@ def main():
         assert bc.add_transaction(miner_hex, target_bech, 5.0, sig, 1) is True
         assert bc.mine_pending_transactions() is True
 
-        assert bc.get_balance(target_hex) == 5.0
-        assert bc.get_balance(target_bech) == 5.0, \
+        assert bc.get_balance(target_hex) == coins_to_atoms(5.0)
+        assert bc.get_balance(target_bech) == coins_to_atoms(5.0), \
             "Bech32 form must see the same balance as hex"
 
         sig_back = sign_transaction(target_priv, target_bech, miner_hex, 1.0, 2)
         assert bc.add_transaction(target_bech, miner_hex, 1.0, sig_back, 2) is True
         assert bc.mine_pending_transactions() is True
-        assert bc.get_balance(target_bech) == 3.0
-        assert bc.get_balance(target_hex) == 3.0
+        assert bc.get_balance(target_bech) == coins_to_atoms(3.0)
+        assert bc.get_balance(target_hex) == coins_to_atoms(3.0)
 
         tx_hex = {"sender": target_hex, "receiver": miner_hex, "amount": 1.0,
                   "nonce": 9, "signature": "00"}
@@ -112,7 +113,8 @@ def main():
         fee_bc._prune_invalid_mempool()
         assert len(fee_bc.unconfirmed_transactions) == 1, \
             "overcommitted mempool transaction must be pruned"
-        assert fee_bc.pending_debits[canonical_address(miner_hex)] == 51.0
+        assert (fee_bc.pending_debits[canonical_address(miner_hex)]
+                == coins_to_atoms(51.0))
         candidate = fee_bc.mine_block_candidate()
         assert candidate is not None and len(candidate["transactions"]) == 1
 
