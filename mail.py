@@ -19,9 +19,12 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 import config
 from core import (ADDRESS_SCHEME_BECH32, ADDRESS_SCHEME_HEX, BECH32_ACTIVATION,
-                  TRANSACTION_FEE, address_from_public_key, canonical_address,
-                  decode_address, is_valid_address, load_private_key,
-                  sign_transaction)
+                  ATOMIC_ACTIVATION, TX_VERSION_ATOMS,
+                  TX_VERSION_LEGACY, address_from_public_key,
+                  atoms_to_coins, canonical_address,
+                  coins_to_atoms, decode_address, format_atoms,
+                  is_valid_address, load_private_key, sign_transaction,
+                  transaction_fee_atoms, tx_amount_atoms)
 
 DEFAULT_NODE = "http://127.0.0.1:8090"
 REMOTE_NODE = "https://coinnode.cool62.net/"
@@ -362,7 +365,19 @@ def _store_transaction(wallet, my_address, tx, height, timestamp):
     record["timestamps"][part_key] = timestamp if timestamp is not None else time.time()
     amount = tx.get("amount")
     if isinstance(amount, (int, float)) and not isinstance(amount, bool):
-        record["amount"] = record.get("amount", 0) + amount
+        try:
+            atoms = tx_amount_atoms(tx, height)
+        except ValueError:
+            atoms = 0
+        total_atoms = record.get("amount_atoms")
+        if not isinstance(total_atoms, int):
+            legacy = record.get("amount", 0)
+            try:
+                total_atoms = coins_to_atoms(legacy)
+            except ValueError:
+                total_atoms = 0
+        record["amount_atoms"] = total_atoms + atoms
+        record["amount"] = float(atoms_to_coins(record["amount_atoms"]))
 
 
 def _iter_blocks(node, start):
@@ -444,7 +459,8 @@ def _add_outbox_entry(wallet, msg_id, recipient, message, total, sent, fee):
         "message": message,
         "total": total,
         "sent": sent,
-        "fee": fee,
+        "fee": float(atoms_to_coins(fee)),
+        "fee_atoms": fee,
         "timestamp": time.time(),
     }
     _outbox(wallet)[entry["id"]] = entry
@@ -505,10 +521,12 @@ def cmd_address(args, private_key):
 
 def cmd_status(args):
     data = _node(args.node, "/info")
+    reward = data.get("reward_atoms")
+    reward_text = format_atoms(reward) if isinstance(reward, int) else data.get("reward")
     print(f"node:  {args.node}")
     print(f"onion: {data.get('onion', '?')}")
     print(f"height: {data.get('height')}   difficulty: {data.get('difficulty')}   "
-          f"reward: {data.get('reward')}")
+          f"reward: {reward_text}")
 
 
 def cmd_send(args, rest, private_key):
@@ -553,46 +571,54 @@ def cmd_send(args, rest, private_key):
 
     from_address = _self_address(private_key)
     try:
-        balance = float(_node(
-            args.node, f"/balance?address={quote(from_address)}")["balance"])
+        data = _node(args.node, f"/balance?address={quote(from_address)}")
+        if "balance_atoms" in data:
+            balance_atoms = int(data["balance_atoms"])
+        else:
+            balance_atoms = coins_to_atoms(data["balance"])
     except (MailError, KeyError, TypeError, ValueError) as e:
         print(f"error: {e}")
         return
 
-    pending = 0.0
+    fee_atoms = transaction_fee_atoms(height)
+    pending = 0
     try:
         pool = _node(args.node, "/txpool")
         for tx in pool.get("transactions", []):
             try:
                 if canonical_address(tx.get("sender")) == from_address:
-                    pending += float(tx.get("amount", 0)) + TRANSACTION_FEE
+                    pending += tx_amount_atoms(tx, height) + fee_atoms
             except (ValueError, TypeError):
                 continue
     except MailError:
         pass
-    balance -= pending
+    balance_atoms -= pending
 
-    fee = len(parts) * TRANSACTION_FEE
-    if balance < fee:
-        print(f"error: insufficient funds (need {fee:g}, have {balance:g})")
+    fee = len(parts) * fee_atoms
+    if balance_atoms < fee:
+        print(f"error: insufficient funds (need {format_atoms(fee)}, "
+              f"have {format_atoms(balance_atoms)})")
         return
 
     from_display = _self_display(private_key, height)
     print(f"message id: {msg_id.hex()[:8]}")
     print(f"from: {from_display}")
     print(f"to:   {receiver}")
-    print(f"parts: {len(parts)}   fee: {fee:g}")
+    print(f"parts: {len(parts)}   fee: {format_atoms(fee)}")
     answer = input("send? [y/N] ").strip().lower()
     if answer not in ("y", "yes"):
         print("cancelled")
         return
 
+    version = (TX_VERSION_ATOMS if height is not None
+               and height >= ATOMIC_ACTIVATION else TX_VERSION_LEGACY)
     sent = 0
     for index, memo in enumerate(parts):
         nonce = int(time.time()) + index
         try:
             signature = sign_transaction(
-                private_key, from_address, receiver, 0, nonce, memo)
+                private_key, from_address, receiver, 0, nonce, memo,
+                version=version)
             tx = {
                 "sender": from_address,
                 "receiver": receiver,
@@ -601,6 +627,8 @@ def cmd_send(args, rest, private_key):
                 "signature": signature,
                 "memo": memo,
             }
+            if version == TX_VERSION_ATOMS:
+                tx["version"] = version
             _node(args.node, "/transaction", method="POST", body=tx)
         except (MailError, ValueError) as e:
             print(f"error sending part {index + 1}/{len(parts)}: {e}")
@@ -671,11 +699,13 @@ def cmd_outbox(args, private_key):
 def _print_outbox_entry(entry):
     stamp = time.strftime("%Y-%m-%d %H:%M",
                           time.localtime(entry.get("timestamp", 0)))
+    fee_atoms = entry.get("fee_atoms")
+    fee_text = format_atoms(fee_atoms) if isinstance(fee_atoms, int) else f"{entry.get('fee', 0):g}"
     print(f"id:     {entry.get('id', '?')}")
     print(f"to:     {entry.get('recipient', '?')}")
     print(f"date:   {stamp}")
     print(f"parts:  {entry.get('sent', '?')}/{entry.get('total', '?')}")
-    print(f"fee:    {entry.get('fee', 0):g}")
+    print(f"fee:    {fee_text}")
     print("")
     print(_sanitize(str(entry.get("message", ""))))
 
@@ -703,7 +733,12 @@ def _print_inbox_entry(private_key, record):
     print(f"id:     {record['id']}")
     print(f"from:   {record.get('sender', '?')}")
     print(f"date:   {stamp}")
-    print(f"amount: {record.get('amount', 0):g}")
+    amount_atoms = record.get("amount_atoms")
+    if isinstance(amount_atoms, int):
+        amount_text = format_atoms(amount_atoms)
+    else:
+        amount_text = f"{record.get('amount', 0):g}"
+    print(f"amount: {amount_text}")
     print("")
     print(body)
 

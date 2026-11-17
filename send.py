@@ -14,7 +14,9 @@ import requests
 
 from core import (load_key_address, load_private_key, sign_transaction,
                   is_valid_address, display_key_address, canonical_address,
-                  BECH32_ACTIVATION, ADDRESS_SCHEME_HEX)
+                  BECH32_ACTIVATION, ADDRESS_SCHEME_HEX, ATOMIC_ACTIVATION,
+                  COIN_ATOMS, TX_VERSION_ATOMS, TX_VERSION_LEGACY,
+                  atoms_to_coins_float, format_atoms, parse_amount_to_atoms)
 
 DEFAULT_NODE = "http://127.0.0.1:8090"
 DEFAULT_KEY = "private_key.pem"
@@ -61,12 +63,9 @@ def _node(base, path, method="GET", body=None):
 
 def _amount(value):
     try:
-        amount = float(value)
-    except ValueError:
-        sys.exit(f"error: invalid amount '{value}'")
-    if amount < 0:
-        sys.exit("error: amount must be non-negative")
-    return amount
+        return parse_amount_to_atoms(value)
+    except ValueError as e:
+        sys.exit(f"error: {e}")
 
 
 def _node_info(base):
@@ -99,23 +98,34 @@ def cmd_balance(args):
     except (ValueError, TypeError):
         query = address
     data = _node(args.node, f"/balance?address={query}")
-    print(f"{address}\nbalance: {int(data['balance']) if data['balance'].is_integer() else data['balance']}")
+    atoms = data.get("balance_atoms")
+    if atoms is None:
+        coins = data["balance"]
+        atoms = coins * COIN_ATOMS if isinstance(coins, float) else int(coins)
+    print(f"{address}\nbalance: {format_atoms(int(atoms))}")
 
 
 def cmd_send(args):
     receiver = args.receiver
-    amount = _amount(args.amount)
     memo = getattr(args, "memo", None) or None
     node_url = args.node
 
     info = _node_info(args.node)
     height = info.get("height") if info else None
     activation = info.get("bech32_activation", BECH32_ACTIVATION) if info else BECH32_ACTIVATION
+    atomic_activation = info.get("atomic_activation", ATOMIC_ACTIVATION) if info else ATOMIC_ACTIVATION
+    version = info.get("tx_version") if info else None
+    if version is None:
+        version = (TX_VERSION_ATOMS if height is not None
+                   and height >= atomic_activation else TX_VERSION_LEGACY)
 
     if not is_valid_address(receiver, height):
         if is_valid_address(receiver) and height is not None and height < activation:
             sys.exit(f"error: Bech32 addresses activate at block {activation} (current height {height})")
         sys.exit("error: receiver is not a valid address")
+
+    amount_atoms = _amount(args.amount)
+    amount = amount_atoms if version == TX_VERSION_ATOMS else atoms_to_coins_float(amount_atoms)
 
     from_address = load_key_address(scheme=ADDRESS_SCHEME_HEX)
     from_display = display_key_address(height=height)
@@ -123,7 +133,8 @@ def cmd_send(args):
     nonce = int(time.time())
 
     try:
-        signature = sign_transaction(private_key, from_address, receiver, amount, nonce, memo)
+        signature = sign_transaction(private_key, from_address, receiver, amount,
+                                     nonce, memo, version=version)
     except ValueError as e:
         sys.exit(f"error: {e}")
     tx = {
@@ -133,11 +144,13 @@ def cmd_send(args):
         "nonce": nonce,
         "signature": signature,
     }
+    if version == TX_VERSION_ATOMS:
+        tx["version"] = version
     if memo:
         tx["memo"] = memo
 
     from_path = args.node.replace("http://", "").replace("https://", "")
-    print(f"sending {int(amount) if amount.is_integer() else amount} to {receiver[:16]}... from {from_display[:16]} at {from_path}")
+    print(f"sending {format_atoms(amount_atoms)} to {receiver[:16]}... from {from_display[:16]} at {from_path}")
     _node(args.node, "/transaction", method="POST", body=tx)
     print(f"tx accepted (nonce {nonce}); it will enter the next mined block")
 
@@ -153,9 +166,11 @@ HELP_TEXT = """commands:
 
 def cmd_status(args):
     data = _node(args.node, "/info")
+    reward = data.get("reward_atoms")
+    reward_text = format_atoms(reward) if reward is not None else data.get("reward")
     print(f"node:  {args.node}")
     print(f"onion: {data.get('onion', '?')}")
-    print(f"height: {data['height']}   difficulty: {data['difficulty']}   reward: {data['reward']}")
+    print(f"height: {data['height']}   difficulty: {data['difficulty']}   reward: {reward_text}")
 
 
 def interactive(args):
