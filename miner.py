@@ -552,7 +552,7 @@ def main():
         miner_address = args.miner
     else:
         try:
-            miner_address = load_key_address()
+            miner_address = load_key_address(scheme="bech32")
         except Exception:
             print("no public_key.pem found and --miner not given; aborting")
             return
