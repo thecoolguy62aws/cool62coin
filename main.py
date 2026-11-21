@@ -170,7 +170,7 @@ def block():
     data = request.get_json(silent=True) or {}
     if blockchain.add_block(data):
         logger.info("accepted block #%s %s (txs=%d)",
-                    data.get("index"), str(data.get("hash"))[:8],
+                    data.get("index"), str(data.get("hash"))[:20],
                     len(data.get("transactions") or []))
         threading.Thread(target=peer_net.broadcast_block, args=(data,),
                          daemon=True).start()
@@ -344,11 +344,11 @@ def main():
     blockchain = Blockchain.load(args.chain)
     if had_chain:
         logger.info("loaded chain height=%d tip=%s genesis=%s",
-                    blockchain.height, blockchain.last_block.hash[:8],
-                    blockchain.chain[0].hash[:8])
+                    blockchain.height, blockchain.last_block.hash[:20],
+                    blockchain.chain[0].hash[:20])
     else:
         logger.info("no stored chain; mined genesis %s",
-                    blockchain.chain[0].hash[:8])
+                    blockchain.chain[0].hash[:20])
 
     logger.info("starting Tor hidden service (data=%s, socks=%d, port=%d)",
                 args.data, args.socks, args.port)

@@ -648,7 +648,7 @@ def main():
             block = engine.poll(1.0)
             if block:
                 result = submit(args.node, block)
-                print(f"  nonce={block['nonce']:,} hash={block['hash'][:16]}..."
+                print(f"  nonce={block['nonce']:,} hash={block['hash'][:20]}..."
                       f" accepted={result}")
                 engine.stop()
                 engine = None
