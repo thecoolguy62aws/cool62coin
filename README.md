@@ -64,10 +64,6 @@ What changes at block 8000:
   previous 11 blocks and stay within 2 hours of wall time, and miners must use
   a valid address once the fork is active.
 
-Run `python test_hardfork.py` to exercise the activation boundary, duplicate
-transactions, alternate genesis chains, malformed input, timestamp rules, and
-replay of the existing chain.
-
 **Do not downgrade a node after it has saved the upgraded chain format.** Older
 releases cannot load it and will start over from genesis.
 
