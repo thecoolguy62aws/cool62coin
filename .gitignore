@@ -6,6 +6,7 @@ data/
 
 addresses.txt
 mail_state.json
+token_state.json
 *.pem
 config.py
 !config_example/config.py
