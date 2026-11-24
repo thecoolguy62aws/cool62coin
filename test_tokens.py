@@ -4,14 +4,17 @@
 """Tests for the c62tok1 memo-token protocol (TOKENS.md)."""
 
 import base64
+import io
 import json
 import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from core import (ADDRESS_SCHEME_HEX, Blockchain, address_from_public_key,
-                  load_private_key, sign_transaction, solve_block)
+from core import (ADDRESS_SCHEME_BECH32, ADDRESS_SCHEME_HEX, Blockchain,
+                  address_from_public_key, load_private_key, sign_transaction,
+                  solve_block)
 from tokens import (MAX_U64, NO_AUTHORITY, OP_BURN, OP_ISSUE, OP_MINT,
                     OP_PUBLIC_MINT, OP_SET_AUTHORITY, OP_TRANSFER,
                     POLICY_CAPPED, POLICY_FIXED, POLICY_OPEN, TOKEN_PREFIX,
@@ -569,12 +572,32 @@ def test_cli_commands(tmp):
     originals = (tokens.scan, tokens._node_info, tokens._node,
                  tokens._check_fee, tokens._confirm)
     tokens.scan = lambda node: (state, tokens.copy.deepcopy(state))
-    tokens._node_info = lambda base: {"height": 100}
+    tokens._node_info = lambda base: {"height": 2000}
     tokens._node = fake_node
     tokens._check_fee = lambda *args: None
     tokens._confirm = lambda prompt: True
     args = type("Args", (), {"node": "x", "key": "x", "scheme": None})()
+    expected_display = address_from_public_key(issuer.public_key(),
+                                               ADDRESS_SCHEME_BECH32)
     try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            tokens.cmd_holders(args, aid, issuer)
+        assert expected_display in out.getvalue(), \
+            "holders must display Bech32m"
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            tokens.cmd_info(args, aid, issuer)
+        assert expected_display in out.getvalue(), \
+            "info must display Bech32m"
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            tokens.cmd_assets(args, "", issuer)
+        assert expected_display[:12] in out.getvalue(), \
+            "assets must display Bech32m"
+
         tokens.dispatch(args, issuer, f"setauth {aid} {alice_addr}")
         assert len(captured) == 1, "setauth did not publish"
         op = decode_op(captured[-1]["memo"])
@@ -631,10 +654,35 @@ def test_cli_commands(tmp):
          tokens._check_fee, tokens._confirm) = originals
 
 
+def test_address_display():
+    import config
+    import tokens
+
+    issuer = load_private_key("private_key.pem")
+    expected = address_from_public_key(issuer.public_key(), ADDRESS_SCHEME_BECH32)
+    assert tokens._self_address(issuer) == address(issuer), \
+        "transaction senders must stay canonical hex"
+
+    had_display = hasattr(config, "ADDRESS_DISPLAY")
+    old_display = getattr(config, "ADDRESS_DISPLAY", None)
+    try:
+        if had_display:
+            del config.ADDRESS_DISPLAY
+        assert tokens._self_display(issuer, None) == expected, \
+            "default display must fall back to Bech32m"
+        assert tokens._display_address(address(issuer), None) == expected
+        assert tokens._display_address(address(issuer), 0) == address(issuer)
+    finally:
+        if had_display:
+            config.ADDRESS_DISPLAY = old_display
+
+
 def main():
     tmp = tempfile.mkdtemp()
     test_codec()
     print("codec ok")
+    test_address_display()
+    print("address display ok")
     test_issue_and_fixed(tmp)
     print("issue/fixed ok")
     test_capped_and_authority(tmp)

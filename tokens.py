@@ -708,16 +708,31 @@ def _self_address(private_key):
     return address_from_public_key(private_key.public_key(), ADDRESS_SCHEME_HEX)
 
 
-def _self_display(private_key, height=None):
-    scheme = None
+def _display_scheme(height=None):
     if height is not None:
-        scheme = (ADDRESS_SCHEME_BECH32 if height >= BECH32_ACTIVATION
-                  else ADDRESS_SCHEME_HEX)
-    scheme = scheme or getattr(config, "ADDRESS_DISPLAY", ADDRESS_SCHEME_HEX)
+        return (ADDRESS_SCHEME_BECH32 if height >= BECH32_ACTIVATION
+                else ADDRESS_SCHEME_HEX)
+    return getattr(config, "ADDRESS_DISPLAY", ADDRESS_SCHEME_BECH32)
+
+
+def _self_display(private_key, height=None):
+    scheme = _display_scheme(height)
     try:
         return address_from_public_key(private_key.public_key(), scheme)
     except ValueError:
         return address_from_public_key(private_key.public_key(), ADDRESS_SCHEME_HEX)
+
+
+def _display_address(address, height=None):
+    """Render a canonical token-state address using the normal display scheme."""
+    if _is_none_authority(address):
+        return NO_AUTHORITY_LABEL
+    scheme = _display_scheme(height)
+    try:
+        public_key = decode_address(address)
+        return address_from_public_key(public_key, scheme)
+    except (ValueError, TypeError):
+        return address
 
 
 def _display_units(amount, decimals):
@@ -884,6 +899,7 @@ def cmd_scan(args, private_key):
 
 def cmd_assets(args, rest, private_key):
     state, _ = scan(args.node)
+    height = (_node_info(args.node) or {}).get("height")
     assets = sorted(state["assets"].values(), key=lambda a: a["name"])
     if not assets:
         print("no assets issued")
@@ -891,9 +907,10 @@ def cmd_assets(args, rest, private_key):
     print(f"{'NAME':<17}{'ID':<10}{'POLICY':<8}{'DEC':<5}{'SUPPLY':>16}  ISSUER")
     for asset in assets:
         supply = _display_units(asset["supply"], asset["decimals"])
+        issuer = _display_address(asset["issuer"], height)[:12]
         print(f"{asset['name']:<17}{asset['id'][:8]:<10}"
               f"{POLICY_LABELS[asset['policy']]:<8}{asset['decimals']:<5}"
-              f"{supply:>16}  {asset['issuer'][:12]}")
+              f"{supply:>16}  {issuer}")
 
 
 def cmd_issue(args, rest, private_key):
@@ -952,11 +969,12 @@ def cmd_issue(args, rest, private_key):
                      mint_cap=mint_cap, start_height=start, end_height=end,
                      authority=authority, metadata=metadata)
     auth_label = (NO_AUTHORITY_LABEL if authority == NO_AUTHORITY
-                  else authority or sender)
+                  else _display_address(authority or sender, height))
     print(f"asset:  {asset_id}")
     print(f"name:   {name}   policy: {policy_name}   decimals: {decimals}")
     print(f"authority: {auth_label}")
-    print(f"supply: {_display_units(initial, decimals)}   to: {receiver}")
+    print(f"supply: {_display_units(initial, decimals)}   "
+          f"to: {_display_address(receiver, height)}")
     if not _confirm("issue? [y/N] "):
         print("cancelled")
         return
@@ -970,6 +988,7 @@ def cmd_info(args, rest, private_key):
         print("usage: info <asset id|prefix|name>")
         return
     state, _ = scan(args.node)
+    height = (_node_info(args.node) or {}).get("height")
     try:
         asset = _find_asset(state, token)
     except TokenError as exc:
@@ -979,9 +998,9 @@ def cmd_info(args, rest, private_key):
     print(f"name:        {asset['name']}")
     print(f"policy:      {POLICY_LABELS[asset['policy']]}")
     print(f"decimals:    {asset['decimals']}")
-    print(f"issuer:      {asset['issuer']}")
+    print(f"issuer:      {_display_address(asset['issuer'], height)}")
     auth_label = (NO_AUTHORITY_LABEL if asset["authority"] == NO_AUTHORITY
-                  else asset["authority"])
+                  else _display_address(asset["authority"], height))
     print(f"authority:   {auth_label}")
     print(f"supply:      {_display_units(asset['supply'], asset['decimals'])} "
           f"({asset['supply']} base units)")
@@ -1029,6 +1048,7 @@ def cmd_balance(args, rest, private_key):
 
 def cmd_holders(args, rest, private_key):
     state, _ = scan(args.node)
+    height = (_node_info(args.node) or {}).get("height")
     try:
         asset = _find_asset(state, rest.strip())
     except TokenError as exc:
@@ -1039,7 +1059,8 @@ def cmd_holders(args, rest, private_key):
         print("no holders")
         return
     for address, amount in sorted(holders.items(), key=lambda kv: -kv[1]):
-        print(f"{_display_units(amount, asset['decimals']):>20}  {address}")
+        shown = _display_address(address, height)
+        print(f"{_display_units(amount, asset['decimals']):>20}  {shown}")
 
 
 def cmd_send(args, rest, private_key, op):
@@ -1083,7 +1104,7 @@ def cmd_send(args, rest, private_key, op):
             memo = encode_op(op, seq, asset_id=asset["id"],
                              authority=new_authority)
             label = (NO_AUTHORITY_LABEL if new_authority == NO_AUTHORITY
-                     else new_authority)
+                     else _display_address(new_authority, height))
             description = f"authority -> {label}"
         else:
             amount = _parse_units(amount_text, asset["decimals"])
@@ -1099,7 +1120,8 @@ def cmd_send(args, rest, private_key, op):
             if op == OP_BURN and _balance(state, asset["id"], me) < amount:
                 raise TokenError("insufficient token balance")
             memo = encode_op(op, seq, asset_id=asset["id"], amount=amount)
-            description = f"{_display_units(amount, asset['decimals'])} {asset['name']} -> {receiver}"
+            description = (f"{_display_units(amount, asset['decimals'])} "
+                           f"{asset['name']} -> {_display_address(receiver, height)}")
     except (TokenError, ValueError) as exc:
         print(f"error: {exc}")
         return
@@ -1136,7 +1158,7 @@ def cmd_claim(args, rest, private_key):
         print(f"error: {exc}")
         return
     print(f"claim {_display_units(asset['mint_amount'], asset['decimals'])} "
-          f"{asset['name']} -> {receiver}")
+          f"{asset['name']} -> {_display_address(receiver, height)}")
     if not _confirm("send? [y/N] "):
         print("cancelled")
         return
