@@ -12,9 +12,9 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric import ed25519
 
-from core import (ADDRESS_SCHEME_BECH32, ADDRESS_SCHEME_HEX, Blockchain,
-                  address_from_public_key, load_private_key, sign_transaction,
-                  solve_block)
+from core import (ADDRESS_SCHEME_BECH32, ADDRESS_SCHEME_HEX, BECH32_ACTIVATION,
+                  Blockchain, address_from_public_key, load_private_key,
+                  sign_transaction, solve_block)
 from tokens import (MAX_U64, NO_AUTHORITY, OP_BURN, OP_ISSUE, OP_MINT,
                     OP_PUBLIC_MINT, OP_SET_AUTHORITY, OP_TRANSFER,
                     POLICY_CAPPED, POLICY_FIXED, POLICY_OPEN, TOKEN_PREFIX,
@@ -26,6 +26,10 @@ DIFF = 3
 
 def address(priv):
     return address_from_public_key(priv.public_key(), ADDRESS_SCHEME_HEX)
+
+
+def bech32_address(priv):
+    return address_from_public_key(priv.public_key(), ADDRESS_SCHEME_BECH32)
 
 
 def build_tx(priv, sender, receiver, memo, nonce, amount=0.0):
@@ -577,8 +581,8 @@ def test_cli_commands(tmp):
     tokens._check_fee = lambda *args: None
     tokens._confirm = lambda prompt: True
     args = type("Args", (), {"node": "x", "key": "x", "scheme": None})()
-    expected_display = address_from_public_key(issuer.public_key(),
-                                               ADDRESS_SCHEME_BECH32)
+    expected_display = bech32_address(issuer)
+    expected_alice_display = bech32_address(alice)
     try:
         out = io.StringIO()
         with redirect_stdout(out):
@@ -601,8 +605,10 @@ def test_cli_commands(tmp):
         tokens.dispatch(args, issuer, f"setauth {aid} {alice_addr}")
         assert len(captured) == 1, "setauth did not publish"
         op = decode_op(captured[-1]["memo"])
-        assert op.op == OP_SET_AUTHORITY and op.authority == alice_addr
-        assert op.seq == 1
+        assert op.op == OP_SET_AUTHORITY and op.seq == 1
+        assert op.authority == expected_alice_display
+        assert captured[-1]["sender"] == expected_display
+        assert captured[-1]["receiver"] == expected_display
 
         tokens.dispatch(args, issuer, f"setauth {aid} none")
         op = decode_op(captured[-1]["memo"])
@@ -611,19 +617,23 @@ def test_cli_commands(tmp):
         tokens.dispatch(args, issuer, f"mint {aid} {alice_addr} 5.00")
         op = decode_op(captured[-1]["memo"])
         assert op.op == OP_MINT and op.amount == 500 and op.seq == 1
+        assert captured[-1]["receiver"] == expected_alice_display
 
         tokens.dispatch(args, issuer, f"burn {aid} 2.00")
         op = decode_op(captured[-1]["memo"])
         assert op.op == OP_BURN and op.amount == 200 and op.seq == 1
+        assert captured[-1]["receiver"] == expected_display
 
         tokens.dispatch(args, issuer, f"send {aid} {alice_addr} 1.00")
         op = decode_op(captured[-1]["memo"])
         assert op.op == OP_TRANSFER and op.amount == 100 and op.seq == 1
+        assert captured[-1]["receiver"] == expected_alice_display
 
         tokens.dispatch(args, issuer, f"claim {aid}")
         op = decode_op(captured[-1]["memo"])
         assert op.op == OP_PUBLIC_MINT and op.seq == 0
         assert captured[-1]["nonce"] != 1, "public mint needs a varied nonce"
+        assert captured[-1]["receiver"] == expected_display
 
         tokens.dispatch(args, issuer,
                         "issue ZERO 0 0 --policy open --mint-amount 1 "
@@ -633,6 +643,9 @@ def test_cli_commands(tmp):
         assert op.policy == POLICY_OPEN and op.mint_amount == 1
         assert op.max_supply == 100000000 and op.end_height == 25000
         assert op.mint_cap == 0
+        assert op.authority == expected_display
+        assert captured[-1]["sender"] == expected_display
+        assert captured[-1]["receiver"] == expected_display
 
         tokens.dispatch(args, issuer,
                         "issue NOAU 0 0 --policy open --mint-amount 1 "
@@ -645,6 +658,9 @@ def test_cli_commands(tmp):
                         "--authority none")
         op = decode_op(captured[-1]["memo"])
         assert op.op == OP_ISSUE and op.authority == NO_AUTHORITY
+
+        assert all(tx["sender"] == expected_display for tx in captured), \
+            "all token transactions must use the active onchain scheme"
 
         before = len(captured)
         tokens.dispatch(args, issuer, "issue FIX0 0 0 --policy fixed")
@@ -677,12 +693,75 @@ def test_address_display():
             config.ADDRESS_DISPLAY = old_display
 
 
+def test_onchain_encoding():
+    import tokens
+
+    issuer = load_private_key("private_key.pem")
+    alice = ed25519.Ed25519PrivateKey.generate()
+    hex_addr, bech_addr = address(issuer), bech32_address(issuer)
+
+    assert tokens._onchain_scheme(BECH32_ACTIVATION - 1) == ADDRESS_SCHEME_HEX
+    assert tokens._onchain_scheme(BECH32_ACTIVATION) == ADDRESS_SCHEME_BECH32
+    assert tokens._submit_address(hex_addr, BECH32_ACTIVATION - 1) == hex_addr
+    assert tokens._submit_address(hex_addr, BECH32_ACTIVATION) == bech_addr
+    assert tokens._submit_address(bech_addr, BECH32_ACTIVATION - 1) == hex_addr
+    assert tokens._self_submit_address(issuer, BECH32_ACTIVATION) == bech_addr
+
+    captured = []
+    originals = tokens._node, tokens._check_fee
+
+    def fake_node(base, path, method="GET", body=None):
+        assert (method, path) == ("POST", "/transaction")
+        captured.append(body)
+        return {"success": True}
+
+    args = type("Args", (), {"node": "x"})()
+    memo = encode_op(OP_BURN, 1, asset_id="ef" * 16, amount=1)
+    try:
+        tokens._node = fake_node
+        tokens._check_fee = lambda *a: None
+        tokens._publish(args, issuer, hex_addr, memo, 9,
+                        BECH32_ACTIVATION - 1)
+    finally:
+        tokens._node, tokens._check_fee = originals
+    assert captured[0]["sender"] == hex_addr
+    assert captured[0]["receiver"] == hex_addr
+
+    state = tokens.new_state("00" * 32)
+    memo = encode_op(OP_ISSUE, 1, name="ONCHAIN", policy=POLICY_OPEN,
+                     initial=0, mint_amount=1, authority=bech_addr)
+    tx = build_tx(issuer, bech_addr, bech_addr, memo, 1)
+    ok, reason = apply_op(state, tx, BECH32_ACTIVATION)
+    assert ok, reason
+    aid = asset_id_for(hex_addr, "ONCHAIN", state["genesis"])
+    assert state["assets"][aid]["issuer"] == hex_addr
+    assert state["assets"][aid]["authority"] == hex_addr
+
+    seq = state["sequences"][aid][hex_addr] + 1
+    memo = encode_op(OP_SET_AUTHORITY, seq, asset_id=aid,
+                     authority=bech32_address(alice))
+    tx = build_tx(issuer, bech_addr, bech_addr, memo, 2)
+    ok, reason = apply_op(state, tx, BECH32_ACTIVATION)
+    assert ok, reason
+    assert state["assets"][aid]["authority"] == address(alice)
+
+    memo = encode_op(OP_ISSUE, 1, name="LEGACY", policy=POLICY_OPEN,
+                     initial=0, mint_amount=1, authority=hex_addr)
+    tx = build_tx(issuer, hex_addr, hex_addr, memo, 3)
+    ok, reason = apply_op(state, tx, BECH32_ACTIVATION)
+    assert ok, reason
+    assert state["assets"][asset_id_for(hex_addr, "LEGACY",
+                                        state["genesis"])]["issuer"] == hex_addr
+
+
 def main():
     tmp = tempfile.mkdtemp()
     test_codec()
     print("codec ok")
     test_address_display()
     print("address display ok")
+    test_onchain_encoding()
+    print("onchain encoding ok")
     test_issue_and_fixed(tmp)
     print("issue/fixed ok")
     test_capped_and_authority(tmp)

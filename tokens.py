@@ -735,6 +735,27 @@ def _display_address(address, height=None):
         return address
 
 
+def _onchain_scheme(height):
+    """Address scheme accepted by consensus for transactions at ``height``."""
+    if height is not None and height >= BECH32_ACTIVATION:
+        return ADDRESS_SCHEME_BECH32
+    return ADDRESS_SCHEME_HEX
+
+
+def _submit_address(address, height):
+    """Encode a canonical token address for broadcast at ``height``."""
+    scheme = _onchain_scheme(height)
+    try:
+        public_key = decode_address(address)
+        return address_from_public_key(public_key, scheme)
+    except (ValueError, TypeError):
+        return address
+
+
+def _self_submit_address(private_key, height):
+    return _submit_address(_self_address(private_key), height)
+
+
 def _display_units(amount, decimals):
     if decimals == 0:
         return str(amount)
@@ -841,11 +862,14 @@ def _check_fee(args, address, height):
 def _publish(args, private_key, receiver, memo, nonce, height):
     from_address = _self_address(private_key)
     _check_fee(args, from_address, height)
+    submit_sender = _self_submit_address(private_key, height)
+    submit_receiver = _submit_address(receiver, height)
     version, amount = _version_for(height)
-    signature = sign_transaction(private_key, from_address, receiver, amount,
-                                 nonce, memo, version=version)
-    tx = {"sender": from_address, "receiver": receiver, "amount": amount,
-          "nonce": nonce, "signature": signature, "memo": memo}
+    signature = sign_transaction(private_key, submit_sender, submit_receiver,
+                                 amount, nonce, memo, version=version)
+    tx = {"sender": submit_sender, "receiver": submit_receiver,
+          "amount": amount, "nonce": nonce, "signature": signature,
+          "memo": memo}
     if version == TX_VERSION_ATOMS:
         tx["version"] = version
     _node(args.node, "/transaction", method="POST", body=tx)
@@ -960,14 +984,17 @@ def cmd_issue(args, rest, private_key):
     state, _ = scan(args.node)
     height = (_node_info(args.node) or {}).get("height")
     sender = _self_address(private_key)
-    if authority != NO_AUTHORITY and authority:
-        _check_receiver(authority, height)
+    if authority == NO_AUTHORITY:
+        memo_authority = NO_AUTHORITY
+    else:
+        authority = _check_receiver(authority or sender, height)
+        memo_authority = _submit_address(authority, height)
     receiver = _check_receiver(receiver, height)
     asset_id = asset_id_for(sender, name, state.get("genesis"))
     memo = encode_op(OP_ISSUE, 1, name=name, decimals=decimals, policy=policy,
                      initial=initial, max_supply=maximum, mint_amount=mint_amount,
                      mint_cap=mint_cap, start_height=start, end_height=end,
-                     authority=authority, metadata=metadata)
+                     authority=memo_authority, metadata=metadata)
     auth_label = (NO_AUTHORITY_LABEL if authority == NO_AUTHORITY
                   else _display_address(authority or sender, height))
     print(f"asset:  {asset_id}")
@@ -1102,7 +1129,8 @@ def cmd_send(args, rest, private_key, op):
             else:
                 new_authority = _check_receiver(authority_value, height)
             memo = encode_op(op, seq, asset_id=asset["id"],
-                             authority=new_authority)
+                             authority=(NO_AUTHORITY if new_authority == NO_AUTHORITY
+                                        else _submit_address(new_authority, height)))
             label = (NO_AUTHORITY_LABEL if new_authority == NO_AUTHORITY
                      else _display_address(new_authority, height))
             description = f"authority -> {label}"
