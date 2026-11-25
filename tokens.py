@@ -1217,26 +1217,6 @@ def cmd_claim(args, rest, private_key):
     print(f"broadcast tx {txid[:12]}")
 
 
-def cmd_history(args, rest, private_key):
-    state, _ = scan(args.node)
-    events = state["history"]
-    token = rest.strip()
-    if token:
-        try:
-            asset = _find_asset(state, token)
-            events = [e for e in events if e["asset_id"] == asset["id"]]
-        except TokenError as exc:
-            print(f"error: {exc}")
-            return
-    if not events:
-        print("no token operations")
-        return
-    for event in events[-30:]:
-        print(f"#{event['height']:<7} {event['op']:<14} "
-              f"{(event['name'] or (event['asset_id'] or '')[:8]):<17} "
-              f"seq={event['seq']:<12} amount={event['amount']:<14} {event['note']}")
-
-
 HELP_TEXT = """commands:
   address [hex|bech32]        show this wallet's address
   status                      node height and token state tip
@@ -1256,7 +1236,6 @@ HELP_TEXT = """commands:
   burn <asset> <amount>       burn your own tokens
   setauth <asset> <address|none>
                               transfer or irrevocably remove authority
-  history [asset]             recent operations
   help                        show this help
   quit                        exit
 
@@ -1309,8 +1288,6 @@ def dispatch(args, private_key, line):
             cmd_send(args, rest, private_key, OP_SET_AUTHORITY)
         elif command == "claim":
             cmd_claim(args, rest, private_key)
-        elif command == "history":
-            cmd_history(args, rest, private_key)
         else:
             print(f"unknown command '{command}' - try 'help'")
     except (TokenError, ValueError) as exc:
