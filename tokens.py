@@ -1252,7 +1252,7 @@ def dispatch(args, private_key, line):
         return True
     if not parts:
         return True
-    command, rest = parts[0].lower(), " ".join(parts[1:])
+    command, rest = parts[0].lower(), shlex.join(parts[1:])
     if command in ("quit", "exit", "q", "bye"):
         return False
     try:
@@ -1320,7 +1320,7 @@ def main():
         print(f"error: cannot load wallet key ({exc})")
         return
     if args.command:
-        dispatch(args, private_key, " ".join([args.command] + args.rest))
+        dispatch(args, private_key, shlex.join([args.command] + args.rest))
     else:
         interactive(args, private_key)
 

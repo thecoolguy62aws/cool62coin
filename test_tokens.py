@@ -754,6 +754,55 @@ def test_onchain_encoding():
                                         state["genesis"])]["issuer"] == hex_addr
 
 
+def test_quoted_option_roundtrip():
+    import sys
+    import tokens
+
+    issuer = load_private_key("private_key.pem")
+    state = tokens.new_state("00" * 32)
+    captured = []
+
+    def fake_node(base, path, method="GET", body=None):
+        if method == "POST" and path == "/transaction":
+            captured.append(body)
+            return {"success": True}
+        raise AssertionError(path)
+
+    originals = (tokens.scan, tokens._node_info, tokens._node,
+                 tokens._check_fee, tokens._confirm)
+    tokens.scan = lambda node: (state, tokens.copy.deepcopy(state))
+    tokens._node_info = lambda base: {"height": 100}
+    tokens._node = fake_node
+    tokens._check_fee = lambda *a: None
+    tokens._confirm = lambda p: True
+    args = type("Args", (), {"node": "x", "key": "x", "scheme": None})()
+    try:
+        with redirect_stdout(io.StringIO()):
+            tokens.dispatch(args, issuer,
+                            "issue MONEY 11 0 --policy open --mint-amount 1 "
+                            '--metadata "hello world notes"')
+    finally:
+        (tokens.scan, tokens._node_info, tokens._node,
+         tokens._check_fee, tokens._confirm) = originals
+    assert tokens.decode_op(captured[-1]["memo"]).metadata == \
+        "hello world notes", "dispatch must preserve quoted option values"
+
+    lines = []
+    original_dispatch, original_argv = tokens.dispatch, sys.argv
+    tokens.dispatch = lambda a, key, line: lines.append(line) or True
+    sys.argv = ["tokens.py", "--node", "x", "issue", "X", "0", "0",
+                "--policy", "open", "--mint-amount", "1",
+                "--metadata", "hello world notes"]
+    try:
+        tokens.main()
+    finally:
+        tokens.dispatch, sys.argv = original_dispatch, original_argv
+    _, opts = tokens._parse_options(tokens.shlex.split(lines[0]),
+                                   {"no-authority"})
+    assert opts["metadata"] == "hello world notes", \
+        "one-shot mode must preserve quoted option values"
+
+
 def test_balance_own_tokens_only():
     import tokens
 
@@ -830,6 +879,8 @@ def main():
     print("cli commands ok")
     test_balance_own_tokens_only()
     print("balance filtering ok")
+    test_quoted_option_roundtrip()
+    print("quoted option roundtrip ok")
     print("all token tests passed")
 
 
