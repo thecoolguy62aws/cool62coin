@@ -369,6 +369,26 @@ def _set_balance(state, asset_id, address, value):
         book[address] = value
 
 
+def _held_asset_ids(state, pending, address):
+    """Asset ids the wallet holds now, has pending, or held in the past."""
+    asset_ids = set()
+    for snapshot in (state, pending):
+        for asset_id, book in snapshot["balances"].items():
+            if book.get(address, 0) > 0:
+                asset_ids.add(asset_id)
+    for event in state["history"]:
+        asset_id = event.get("asset_id")
+        if not asset_id:
+            continue
+        amount = event.get("amount", 0)
+        if ((event.get("receiver") == address and amount > 0)
+                or (event.get("sender") == address and amount > 0
+                    and event.get("op") in (OP_NAMES[OP_TRANSFER],
+                                            OP_NAMES[OP_BURN]))):
+            asset_ids.add(asset_id)
+    return asset_ids
+
+
 def _verify_tx(tx):
     try:
         version = tx_version(tx)
@@ -561,7 +581,7 @@ def apply_op(state, tx, height):
         "name": state["assets"][op.asset_id]["name"] if op.asset_id else None,
         "sender": sender,
         "receiver": receiver,
-        "amount": op.amount,
+        "amount": op.initial if op.op == OP_ISSUE else op.amount,
         "note": op.note,
     })
     return True, None
@@ -1049,14 +1069,16 @@ def cmd_balance(args, rest, private_key):
     state, pending = scan(args.node)
     me = _self_address(private_key)
     token = rest.strip()
+    held = _held_asset_ids(state, pending, me)
     if token:
         try:
             assets = [_find_asset(state, token)]
         except TokenError as exc:
             print(f"error: {exc}")
             return
+        assets = [asset for asset in assets if asset["id"] in held]
     else:
-        assets = [state["assets"][aid] for aid in state["balances"]
+        assets = [state["assets"][aid] for aid in held
                   if aid in state["assets"]]
     if not assets:
         print("no token balances")

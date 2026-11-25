@@ -754,6 +754,52 @@ def test_onchain_encoding():
                                         state["genesis"])]["issuer"] == hex_addr
 
 
+def test_balance_own_tokens_only():
+    import tokens
+
+    issuer = load_private_key("private_key.pem")
+    alice = ed25519.Ed25519PrivateKey.generate()
+    me, alice_addr = address(issuer), address(alice)
+    held, past, other, issued_away = ("11" * 16, "22" * 16,
+                                      "33" * 16, "44" * 16)
+    state = tokens.new_state("00" * 32)
+    for asset_id, name in ((held, "MINE"), (past, "PAST"),
+                           (other, "OTHER"), (issued_away, "ISSUED")):
+        state["assets"][asset_id] = {
+            "id": asset_id, "name": name, "decimals": 0,
+        }
+    state["balances"][held] = {me: 100, alice_addr: 50}
+    state["balances"][other] = {alice_addr: 10}
+    state["history"] = [
+        {"height": 1, "txid": "00" * 64, "op": "transfer", "seq": 1,
+         "asset_id": past, "name": "PAST", "sender": me,
+         "receiver": alice_addr, "amount": 100, "note": ""},
+        {"height": 2, "txid": "00" * 64, "op": "issue", "seq": 1,
+         "asset_id": issued_away, "name": "ISSUED", "sender": me,
+         "receiver": alice_addr, "amount": 100, "note": ""},
+    ]
+    args = type("Args", (), {"node": "x"})()
+    original_scan = tokens.scan
+    tokens.scan = lambda node: (state, tokens.copy.deepcopy(state))
+    try:
+        out = io.StringIO()
+        with redirect_stdout(out):
+            tokens.dispatch(args, issuer, "balance")
+        text = out.getvalue()
+        assert "MINE" in text and "PAST" in text, \
+            "balance must list current and former holdings"
+        assert "OTHER" not in text and "ISSUED" not in text, \
+            "balance must not list assets the wallet never held"
+
+        out = io.StringIO()
+        with redirect_stdout(out):
+            tokens.dispatch(args, issuer, "balance OTHER")
+        assert "OTHER" not in out.getvalue(), \
+            "explicit balance must not list an asset never held"
+    finally:
+        tokens.scan = original_scan
+
+
 def main():
     tmp = tempfile.mkdtemp()
     test_codec()
@@ -782,6 +828,8 @@ def main():
     print("mocked scan ok")
     test_cli_commands(tmp)
     print("cli commands ok")
+    test_balance_own_tokens_only()
+    print("balance filtering ok")
     print("all token tests passed")
 
 
